@@ -29,10 +29,10 @@ run-server-sqlite:
 	go run ./cmd/server -db=sqlite -db-dsn=orders.db -exporter=otlp -collector-addr=localhost:4317 -port=8080
 
 run-server-postgres-sql:
-	go run ./cmd/server -db=postgres-sql -db-dsn="postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable" -exporter=otlp -collector-addr=localhost:4317 -port=8080
+	go run ./cmd/server -db=postgres-sql -db-dsn="postgres://postgres:postgrespassword@localhost:5433/ecommerce_db?sslmode=disable" -exporter=otlp -collector-addr=localhost:4317 -port=8080
 
 run-server-postgres-pgx:
-	go run ./cmd/server -db=postgres-pgx -db-dsn="postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable" -exporter=otlp -collector-addr=localhost:4317 -port=8080
+	go run ./cmd/server -db=postgres-pgx -db-dsn="postgres://postgres:postgrespassword@localhost:5433/ecommerce_db?sslmode=disable" -exporter=otlp -collector-addr=localhost:4317 -port=8080
 
 run-server-stdout:
 	go run ./cmd/server -db=sqlite -db-dsn=orders.db -exporter=stdout -port=8080
@@ -42,7 +42,7 @@ run-client:
 
 docker-up:
 	docker compose up -d
-	@echo "✓ PostgreSQL available at:    localhost:5432"
+	@echo "✓ PostgreSQL available at:    localhost:5433 (user: postgres, pass: postgrespassword)"
 	@echo "✓ Jaeger UI available at:     http://localhost:16686"
 	@echo "✓ Prometheus UI available at: http://localhost:9090"
 	@echo "✓ Collector OTLP gRPC at:     localhost:4317"

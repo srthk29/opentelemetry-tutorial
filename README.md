@@ -381,15 +381,29 @@ Switch seamlessly using the `-db` flag or `DB_TYPE` environment variable:
 # In-Memory
 make run-server DB_TYPE=memory
 
-# SQLite (default)
+# SQLite (default, zero dependencies)
 make run-server-sqlite
 
-# PostgreSQL via unified otelsql (Approach A)
+# PostgreSQL via unified otelsql (Approach A) - connects to Docker on localhost:5433
 make run-server-postgres-sql
 
-# PostgreSQL via native otelpgx (Approach B)
+# PostgreSQL via native otelpgx (Approach B) - connects to Docker on localhost:5433
 make run-server-postgres-pgx
 ```
+
+> [!NOTE]
+> **Why Port 5433?**
+> On macOS, if you have Homebrew PostgreSQL installed (`brew services start postgresql`), it listens on port `5432` with your Mac username (e.g. `sarthak`) and does not have the `postgres` user.
+> To prevent port conflicts, Docker Compose maps container PostgreSQL to **host port 5433** (`5433:5432`) with credentials:
+> - **Host**: `localhost:5433`
+> - **User**: `postgres`
+> - **Password**: `postgrespassword`
+> - **Database**: `ecommerce_db`
+>
+> If you prefer using your local Homebrew PostgreSQL on port 5432 instead, pass your local DSN:
+> ```bash
+> go run ./cmd/server -db=postgres-sql -db-dsn="postgres://$(whoami)@localhost:5432/postgres?sslmode=disable"
+> ```
 
 ---
 

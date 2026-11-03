@@ -85,7 +85,7 @@ func main() {
 	case "postgres-sql":
 		dsn := *dbDSN
 		if dsn == "" {
-			dsn = "postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable"
+			dsn = "postgres://postgres:postgrespassword@localhost:5433/ecommerce_db?sslmode=disable"
 		}
 		repo, err := postgres.NewSQLRepository(ctx, dsn)
 		if err != nil {
@@ -98,7 +98,7 @@ func main() {
 	case "postgres-pgx":
 		dsn := *dbDSN
 		if dsn == "" {
-			dsn = "postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable"
+			dsn = "postgres://postgres:postgrespassword@localhost:5433/ecommerce_db?sslmode=disable"
 		}
 		repo, err := postgres.NewPGXPoolRepository(ctx, dsn)
 		if err != nil {
