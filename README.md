@@ -79,13 +79,22 @@ A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry
 
 ```
 ├── cmd/
-│   ├── server/main.go            # Instrumented HTTP Server (Order API)
-│   └── client/main.go            # Instrumented Client Simulator (Sends test traffic)
+│   ├── server/main.go               # Instrumented HTTP Server (Order API)
+│   └── client/main.go               # Instrumented Client Simulator (Sends test traffic)
 ├── internal/
-│   ├── telemetry/telemetry.go    # OTel SDK bootstrap (TracerProvider, MeterProvider, Resource, Shutdown)
-│   └── service/order.go          # Business service demonstrating spans, events, attributes & metrics
+│   ├── domain/                      # 🛡️ PURE BUSINESS DOMAIN (ZERO OpenTelemetry imports!)
+│   │   ├── order.go                 # Pure domain models, validation, and business logic
+│   │   └── order_test.go            # Ultra-fast pure domain unit tests (no OTel setup)
+│   ├── telemetry/                   # 🔌 INFRASTRUCTURE & TELEMETRY ADAPTERS
+│   │   ├── telemetry.go             # OTel SDK bootstrap (TracerProvider, MeterProvider, Resource, Shutdown)
+│   │   ├── metrics_adapter.go       # Adapter implementing domain.MetricsRecorder port via OTel
+│   │   ├── order_decorator.go       # Decorator wrapping pure domain service with tracing & latencies
+│   │   └── order_decorator_test.go  # Decorator integration tests
+│   └── service/                     # 📚 Alternative Direct-instrumentation reference
+│       ├── order.go
+│       └── order_test.go
 ├── scripts/
-│   └── run-local-collector.sh    # Script to download & run standalone OTel Collector
+│   └── run-local-collector.sh       # Script to download & run standalone OTel Collector
 ├── otel-collector-local.yaml     # Collector configuration for local standalone running
 ├── otel-collector-config.yaml    # Collector configuration for Docker Compose (with Jaeger & Prometheus)
 ├── docker-compose.yaml           # Docker Compose orchestration (Collector + Jaeger + Prometheus)
@@ -188,6 +197,115 @@ make run-client
 To tear down Docker services:
 ```bash
 make docker-down
+```
+
+---
+
+## 🛡️ Solving Telemetry Pollution in Business Logic
+
+A common concern when adopting OpenTelemetry is **code pollution**: `tracer.Start()`, `span.SetAttributes()`, and `counter.Add()` calls polluting pure business logic, violating the **Single Responsibility Principle** and making unit testing noisy.
+
+This project demonstrates the industry-standard solution using **Clean / Hexagonal Architecture** and the **Decorator Pattern**:
+
+```
+                       HTTP Request
+                            │
+                            ▼
+           ┌───────────────────────────────────┐
+           │     otelhttp.NewHandler           │  (Boundary Tracing)
+           └────────────────┬──────────────────┘
+                            │
+                            ▼
+           ┌───────────────────────────────────┐
+           │    InstrumentedOrderService       │  (Decorator Pattern)
+           │    - Starts spans (order.process) │  (Lives in internal/telemetry)
+           │    - Injects span attributes      │
+           │    - Measures latency histograms  │
+           └────────────────┬──────────────────┘
+                            │ Calls pure interface
+                            ▼
+           ┌───────────────────────────────────┐
+           │        PureOrderService           │  (Pure Domain Logic)
+           │    - Validates order items        │  (Lives in internal/domain)
+           │    - Checks card payment limits   │  (ZERO OTel IMPORTS!)
+           │    - Saves to repository          │
+           └────────────────┬──────────────────┘
+                            │ Emits domain metrics via Port
+                            ▼
+           ┌───────────────────────────────────┐
+           │      OTelMetricsAdapter           │  (Ports & Adapters)
+           │  Implements MetricsRecorder port  │  (Lives in internal/telemetry)
+           └───────────────────────────────────┘
+```
+
+### 1. Pure Domain Logic (`internal/domain/order.go`)
+Notice: **Zero OpenTelemetry imports**. Pure business rules, zero observability coupling:
+```go
+type PureOrderService struct {
+    repo    OrderRepository
+    metrics MetricsRecorder // Domain Port interface
+}
+
+func (s *PureOrderService) CreateOrder(ctx context.Context, req CreateOrderRequest) (*Order, error) {
+    total, err := s.validateItems(req.Items)
+    if err != nil {
+        s.metrics.RecordOrderFailed(ctx, req.PaymentMethod, req.CustomerTier, "validation_error")
+        return nil, err
+    }
+    // ... pure business rules ...
+    s.metrics.RecordOrderCreated(ctx, total, req.PaymentMethod, req.CustomerTier)
+    return order, nil
+}
+```
+
+### 2. Domain Metrics Port (`internal/domain/order.go`)
+The domain defines *what* it wants to measure, without knowing *how* it is measured:
+```go
+type MetricsRecorder interface {
+    RecordOrderCreated(ctx context.Context, amount float64, paymentMethod, customerTier string)
+    RecordOrderFailed(ctx context.Context, paymentMethod, customerTier, reason string)
+}
+```
+
+### 3. Telemetry Decorator (`internal/telemetry/order_decorator.go`)
+The decorator wraps any `domain.OrderService`, attaching spans and timing without changing one line of domain code:
+```go
+type InstrumentedOrderService struct {
+    next           domain.OrderService
+    tracer         trace.Tracer
+    metricsAdapter *OTelMetricsAdapter
+}
+
+func (s *InstrumentedOrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRequest) (*domain.Order, error) {
+    ctx, span := s.tracer.Start(ctx, "order.process",
+        trace.WithAttributes(attribute.String("customer.id", req.CustomerID)),
+    )
+    defer span.End()
+
+    order, err := s.next.CreateOrder(ctx, req) // Calls pure business logic!
+    if err != nil {
+        span.RecordError(err)
+        span.SetStatus(codes.Error, err.Error())
+        return nil, err
+    }
+
+    span.SetStatus(codes.Ok, "order created")
+    return order, nil
+}
+```
+
+### 4. Frictionless Unit Testing (`internal/domain/order_test.go`)
+Domain tests run in milliseconds without needing to initialize tracers, meters, exporters, or background collectors:
+```go
+func TestPureOrderService_Unit(t *testing.T) {
+    repo := domain.NewInMemoryOrderRepository()
+    // Pass domain.NoopMetricsRecorder{} - no mocks or OTel SDK needed!
+    svc := domain.NewPureOrderService(repo, domain.NoopMetricsRecorder{})
+
+    order, err := svc.CreateOrder(context.Background(), validReq)
+    assert.NoError(t, err)
+    assert.Equal(t, 60.0, order.TotalAmount)
+}
 ```
 
 ---

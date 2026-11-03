@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sarthak/opentelemetry-tutorial/internal/service"
+	"github.com/sarthak/opentelemetry-tutorial/internal/domain"
 	"github.com/sarthak/opentelemetry-tutorial/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -61,7 +61,7 @@ func main() {
 		customerID:   "cust-gold-001",
 		customerTier: "gold",
 		method:       "credit_card",
-		items: []service.Item{
+		items: []domain.Item{
 			{SKU: "LAPTOP-PRO", Quantity: 1, Price: 1200.00},
 			{SKU: "USB-HUB", Quantity: 2, Price: 45.00},
 		},
@@ -75,7 +75,7 @@ func main() {
 		customerID:   "cust-walkin-99",
 		customerTier: "standard",
 		method:       "cash",
-		items: []service.Item{
+		items: []domain.Item{
 			{SKU: "COFFEE-ESPRESSO", Quantity: 2, Price: 4.50},
 			{SKU: "CROISSANT", Quantity: 1, Price: 3.50},
 		},
@@ -89,7 +89,7 @@ func main() {
 		customerID:   "cust-fraud-risk",
 		customerTier: "standard",
 		method:       "credit_card",
-		items: []service.Item{
+		items: []domain.Item{
 			{SKU: "SERVER-RACK-ENTERPRISE", Quantity: 1, Price: 9500.00},
 		},
 	})
@@ -107,7 +107,7 @@ type scenario struct {
 	customerID   string
 	customerTier string
 	method       string
-	items        []service.Item
+	items        []domain.Item
 }
 
 func runScenario(ctx context.Context, tracer trace.Tracer, client *http.Client, serverURL string, sc scenario) {
@@ -123,8 +123,9 @@ func runScenario(ctx context.Context, tracer trace.Tracer, client *http.Client, 
 	traceID := span.SpanContext().TraceID().String()
 	log.Printf("\n▶ %s [TraceID: %s]\n", sc.name, traceID)
 
-	reqPayload := service.CreateOrderRequest{
+	reqPayload := domain.CreateOrderRequest{
 		CustomerID:    sc.customerID,
+		CustomerTier:  sc.customerTier,
 		Items:         sc.items,
 		PaymentMethod: sc.method,
 	}
@@ -150,7 +151,7 @@ func runScenario(ctx context.Context, tracer trace.Tracer, client *http.Client, 
 
 	// If successful, test retrieving the created order via GET /orders/{id}
 	if resp.StatusCode == http.StatusCreated {
-		var created service.Order
+		var created domain.Order
 		if err := json.Unmarshal(respBytes, &created); err == nil {
 			getOrderReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/orders/%s", serverURL, created.ID), nil)
 			getResp, err := client.Do(getOrderReq)

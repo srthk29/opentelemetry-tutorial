@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sarthak/opentelemetry-tutorial/internal/service"
+	"github.com/sarthak/opentelemetry-tutorial/internal/domain"
 	"github.com/sarthak/opentelemetry-tutorial/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -29,7 +29,6 @@ func main() {
 	serviceName := flag.String("service-name", "order-service", "Service name for OpenTelemetry resource")
 	flag.Parse()
 
-	// Environment variable overrides
 	if envPort := os.Getenv("PORT"); envPort != "" {
 		fmt.Sscanf(envPort, "%d", port)
 	}
@@ -46,7 +45,7 @@ func main() {
 	log.Printf("Starting %s with exporter=%s, collector=%s, port=%d\n",
 		*serviceName, *exporterType, *collectorEndpoint, *port)
 
-	// 2. Initialize OpenTelemetry SDK (TracerProvider, MeterProvider, Propagator)
+	// 2. Initialize OpenTelemetry SDK (TracerProvider, MeterProvider, Propagators)
 	ctx := context.Background()
 	cfg := telemetry.DefaultConfig(*serviceName)
 	cfg.ExporterType = *exporterType
@@ -57,11 +56,20 @@ func main() {
 		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}
 
-	// 3. Initialize Domain Service (handles business logic, spans, metrics)
-	orderService, err := service.NewOrderService()
+	// 3. Clean Architecture Composition:
+	// A. Create Metrics Adapter (Adapter for domain.MetricsRecorder port)
+	metricsAdapter, err := telemetry.NewOTelMetricsAdapter()
 	if err != nil {
-		log.Fatalf("Failed to create OrderService: %v", err)
+		log.Fatalf("Failed to create metrics adapter: %v", err)
 	}
+
+	// B. Create Pure Domain Service (100% Free of any OpenTelemetry imports!)
+	orderRepo := domain.NewInMemoryOrderRepository()
+	pureOrderService := domain.NewPureOrderService(orderRepo, metricsAdapter)
+
+	// C. Wrap with Telemetry Decorator (Decorator Pattern)
+	// Both pureOrderService and instrumentedOrderService implement domain.OrderService!
+	var orderService domain.OrderService = telemetry.NewInstrumentedOrderService(pureOrderService, metricsAdapter)
 
 	// 4. Configure HTTP Routes
 	mux := http.NewServeMux()
@@ -83,7 +91,7 @@ func main() {
 			return
 		}
 
-		var req service.CreateOrderRequest
+		var req domain.CreateOrderRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			span.RecordError(err)
 			http.Error(w, fmt.Sprintf("Invalid JSON body: %v", err), http.StatusBadRequest)
@@ -93,9 +101,9 @@ func main() {
 		order, err := orderService.CreateOrder(r.Context(), req)
 		if err != nil {
 			status := http.StatusInternalServerError
-			if errors.Is(err, service.ErrInvalidOrderAmount) || errors.Is(err, service.ErrEmptyOrderItems) {
+			if errors.Is(err, domain.ErrInvalidOrderAmount) || errors.Is(err, domain.ErrEmptyOrderItems) {
 				status = http.StatusBadRequest
-			} else if errors.Is(err, service.ErrPaymentFailed) {
+			} else if errors.Is(err, domain.ErrPaymentFailed) {
 				status = http.StatusPaymentRequired
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -127,7 +135,7 @@ func main() {
 
 		order, err := orderService.GetOrder(r.Context(), orderID)
 		if err != nil {
-			if errors.Is(err, service.ErrOrderNotFound) {
+			if errors.Is(err, domain.ErrOrderNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
@@ -141,8 +149,6 @@ func main() {
 	})
 
 	// 5. Wrap HTTP Handler with otelhttp to automatically trace inbound HTTP requests
-	// otelhttp automatically extracts W3C traceparent headers, starts server spans,
-	// and records http.server.request.duration metrics!
 	otelHandler := otelhttp.NewHandler(mux, "http.server",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
@@ -163,7 +169,6 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal (SIGINT or SIGTERM)
 	stopSig := make(chan os.Signal, 1)
 	signal.Notify(stopSig, os.Interrupt, syscall.SIGTERM)
 
@@ -174,7 +179,6 @@ func main() {
 		log.Printf("Received signal '%v', initiating graceful shutdown...", sig)
 	}
 
-	// Gracefully shutdown HTTP server (wait up to 5s for active requests to finish)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -184,7 +188,6 @@ func main() {
 		log.Println("HTTP server stopped gracefully.")
 	}
 
-	// Flush and close OpenTelemetry Providers (ensures all spans & metrics reach collector)
 	telemetryShutdownCtx, cancelTele := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelTele()
 
