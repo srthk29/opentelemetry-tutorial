@@ -1,0 +1,358 @@
+# OpenTelemetry Go Tutorial & Complete Reference
+
+A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry (OTel)** integration in Golang.
+
+---
+
+## 🎯 What This Project Covers
+
+1. **OpenTelemetry Go SDK Integration**:
+   - Setting up `Resource` attributes (`service.name`, `service.version`, `deployment.environment`).
+   - Configuring `TracerProvider` with `BatchSpanProcessor` or `SimpleSpanProcessor`.
+   - Configuring `MeterProvider` with `PeriodicReader` and custom export intervals.
+   - Configuring W3C Context Propagators (`TraceContext` and `Baggage`).
+   - Proper lifecycle management with graceful shutdown to flush queued telemetry.
+
+2. **Traces Collection**:
+   - Inbound HTTP server auto-instrumentation using `otelhttp.NewHandler`.
+   - Outbound HTTP client auto-instrumentation with header propagation using `otelhttp.NewTransport`.
+   - Manual child spans (`tracer.Start(ctx, ...)`).
+   - Custom span attributes (`attribute.String`, `attribute.Float64`, `attribute.Int`).
+   - In-span events with timestamps and attributes (`span.AddEvent(...)`).
+   - Error recording and status setting (`span.RecordError(err)` and `span.SetStatus(codes.Error, ...)`).
+   - Cross-boundary Baggage extraction and propagation (`baggage.FromContext(ctx)`).
+
+3. **Metrics Collection**:
+   - **Counter** (`orders.total`): Monotonically increasing counter with dimensions (`status`, `payment_method`, `customer_tier`).
+   - **UpDownCounter** (`orders.active`): Tracks in-flight / active processing jobs.
+   - **Histogram** (`orders.amount.usd`, `orders.processing_time_ms`): Records value distributions and latency histograms with buckets.
+   - **Observable Gauge** (`system.memory.heap_alloc_bytes`, `system.goroutines`): Asynchronous instruments queried periodically via callback.
+
+4. **Collector Integration**:
+   - OTLP gRPC (`:4317`) and OTLP HTTP (`:4318`) receivers.
+   - Processors: `memory_limiter` and `batch`.
+   - Exporters: `debug` (collector console), `otlp/jaeger` (Jaeger tracing backend), and `prometheus` (`:8889/metrics`).
+   - Ready-to-use configurations for **both** standalone local execution (no Docker required) and full **Docker Compose** (Jaeger + Prometheus).
+
+---
+
+## 📐 Architecture Overview
+
+```
+                      +-----------------------------------+
+                      |   Client Simulator                |
+                      |   - Service: client-simulator     |
+                      |   - otelhttp.Transport (TraceId)  |
+                      |   - W3C Baggage ("customer.tier") |
+                      +-----------------+-----------------+
+                                        | HTTP Request
+                                        v
+                      +-----------------------------------+
+                      |   Order API Server (Golang)       |
+                      |   - Service: order-service        |
+                      |   - otelhttp.Handler              |
+                      |   - Spans: order.process, etc.    |
+                      |   - Metrics: Counter, Histograms  |
+                      +-----------------+-----------------+
+                                        | OTLP (gRPC / :4317)
+                                        v
+                      +-----------------------------------+
+                      |   OpenTelemetry Collector         |
+                      |   - Receiver: OTLP gRPC/HTTP      |
+                      |   - Processors: memory_limiter,   |
+                      |                 batch             |
+                      |   - Exporters: debug, jaeger,     |
+                      |                prometheus         |
+                      +--------+-----------------+--------+
+                               |                 |
+                   OTLP Traces |                 | Prometheus Scrape
+                               v                 v
+                 +-------------------+     +-------------------+
+                 | Jaeger UI         |     | Prometheus UI     |
+                 | (localhost:16686) |     | (localhost:9090)  |
+                 +-------------------+     +-------------------+
+```
+
+---
+
+## 📂 Project Structure
+
+```
+├── cmd/
+│   ├── server/main.go            # Instrumented HTTP Server (Order API)
+│   └── client/main.go            # Instrumented Client Simulator (Sends test traffic)
+├── internal/
+│   ├── telemetry/telemetry.go    # OTel SDK bootstrap (TracerProvider, MeterProvider, Resource, Shutdown)
+│   └── service/order.go          # Business service demonstrating spans, events, attributes & metrics
+├── scripts/
+│   └── run-local-collector.sh    # Script to download & run standalone OTel Collector
+├── otel-collector-local.yaml     # Collector configuration for local standalone running
+├── otel-collector-config.yaml    # Collector configuration for Docker Compose (with Jaeger & Prometheus)
+├── docker-compose.yaml           # Docker Compose orchestration (Collector + Jaeger + Prometheus)
+├── prometheus.yaml               # Prometheus scraper configuration
+├── Makefile                      # Easy workflow shortcuts
+└── go.mod
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+You can run this project in **3 different ways** depending on your environment.
+
+### Option A: Standalone Local Collector (No Docker Required! ⭐ Recommended)
+
+This mode runs the official OpenTelemetry Collector binary directly on your machine.
+
+#### Step 1: Start the OpenTelemetry Collector
+In Terminal 1:
+```bash
+make run-collector
+```
+*(The script will automatically download the standalone `otelcol` binary if not already present in `./bin` and start listening on ports `4317` gRPC and `8889` Prometheus).*
+
+#### Step 2: Start the Go Order API Server
+In Terminal 2:
+```bash
+make run-server
+```
+*The server connects to `localhost:4317` (Collector) and listens on `http://localhost:8080`.*
+
+#### Step 3: Run the Client Traffic Simulator
+In Terminal 3:
+```bash
+make run-client
+```
+
+#### Step 4: Observe the Telemetry!
+- **Collector Terminal (Terminal 1)**: You will see formatted spans and metric records printed live by the collector's `debug` exporter.
+- **Prometheus Metrics**: Scrape the Collector's Prometheus metrics endpoint:
+  ```bash
+  curl -s http://localhost:8889/metrics | grep -E "app_orders|app_system"
+  ```
+
+---
+
+### Option B: Zero-Dependency Console Mode (Inspect Spans & Metrics directly in Terminal)
+
+If you don't want to run any collector and just want to inspect the raw JSON traces and metric data structures directly in your terminal:
+
+#### Step 1: Start Server in STDOUT mode
+In Terminal 1:
+```bash
+make run-server-stdout
+```
+
+#### Step 2: Run Client
+In Terminal 2:
+```bash
+make run-client
+```
+*Both the client and server will output colorized JSON representations of completed spans and metric points.*
+
+---
+
+### Option C: Full Docker Compose (With Jaeger UI & Prometheus UI)
+
+If you have Docker installed and want to visualize traces in Jaeger UI and metrics in Prometheus:
+
+#### Step 1: Spin up the observability stack
+```bash
+make docker-up
+```
+This starts:
+- **Jaeger Web UI**: [http://localhost:16686](http://localhost:16686)
+- **Prometheus Web UI**: [http://localhost:9090](http://localhost:9090)
+- **OTel Collector**: listening on `localhost:4317` (gRPC) & `localhost:4318` (HTTP)
+
+#### Step 2: Start the Go Server
+```bash
+make run-server
+```
+
+#### Step 3: Send Traffic
+```bash
+make run-client
+```
+
+#### Step 4: Explore the UIs
+- Open **Jaeger** at [http://localhost:16686](http://localhost:16686):
+  - Select Service: `order-service` or `client-simulator`
+  - Click **Find Traces** to see end-to-end distributed waterfall traces!
+  - Click into an individual trace to view child spans (`order.process` -> `payment.authorize` -> `db.insert_order`) and their span events and attributes.
+- Open **Prometheus** at [http://localhost:9090](http://localhost:9090):
+  - Query: `app_orders_total`
+  - Query: `app_orders_amount_usd_USD_bucket`
+  - Query: `app_system_memory_heap_alloc_bytes`
+
+To tear down Docker services:
+```bash
+make docker-down
+```
+
+---
+
+## 🔍 Key Code Walkthrough
+
+### 1. Initializing OpenTelemetry (`internal/telemetry/telemetry.go`)
+
+```go
+// 1. Create Resource attributes
+res, err := resource.Merge(
+    resource.Default(),
+    resource.NewSchemaless(
+        semconv.ServiceName(cfg.ServiceName),
+        semconv.ServiceVersion(cfg.ServiceVersion),
+        semconv.DeploymentEnvironment(cfg.Environment),
+    ),
+)
+
+// 2. Set up W3C Context Propagator
+otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+    propagation.TraceContext{}, // W3C traceparent header
+    propagation.Baggage{},      // W3C baggage header
+))
+
+// 3. Initialize OTLP gRPC Trace Exporter & BatchSpanProcessor
+spanExporter, err := otlptracegrpc.New(ctx,
+    otlptracegrpc.WithEndpoint("localhost:4317"),
+    otlptracegrpc.WithInsecure(),
+)
+tp := sdktrace.NewTracerProvider(
+    sdktrace.WithBatcher(spanExporter),
+    sdktrace.WithResource(res),
+)
+otel.SetTracerProvider(tp)
+
+// 4. Initialize OTLP gRPC Metric Exporter & PeriodicReader
+metricExporter, err := otlpmetricgrpc.New(ctx,
+    otlpmetricgrpc.WithEndpoint("localhost:4317"),
+    otlpmetricgrpc.WithInsecure(),
+)
+reader := sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(3*time.Second))
+mp := sdkmetric.NewMeterProvider(
+    sdkmetric.WithResource(res),
+    sdkmetric.WithReader(reader),
+)
+otel.SetMeterProvider(mp)
+```
+
+---
+
+### 2. Tracing: Child Spans, Attributes & Events (`internal/service/order.go`)
+
+```go
+// Start a root child span
+ctx, span := s.tracer.Start(ctx, "order.process",
+    trace.WithAttributes(
+        attribute.String("customer.id", req.CustomerID),
+        attribute.String("payment.method", req.PaymentMethod),
+    ),
+)
+defer span.End()
+
+// Add child span for payment
+ctx, paymentSpan := s.tracer.Start(ctx, "payment.authorize")
+defer paymentSpan.End()
+
+// Add Span Event (milestone inside a span)
+paymentSpan.AddEvent("payment_authorized", trace.WithAttributes(
+    attribute.String("payment.transaction_id", "tx-12345"),
+))
+
+// Handle errors
+if err != nil {
+    paymentSpan.RecordError(err)
+    paymentSpan.SetStatus(codes.Error, "payment gateway declined transaction")
+    return err
+}
+paymentSpan.SetStatus(codes.Ok, "payment authorized")
+```
+
+---
+
+### 3. Metrics: Synchronous & Asynchronous Instruments (`internal/service/order.go`)
+
+```go
+meter := otel.Meter("order-service")
+
+// Synchronous Counter
+counter, _ := meter.Int64Counter("orders.total", metric.WithDescription("Total orders created"))
+counter.Add(ctx, 1, metric.WithAttributes(
+    attribute.String("status", "success"),
+    attribute.String("payment_method", "credit_card"),
+))
+
+// Synchronous UpDownCounter (active tasks)
+inFlight, _ := meter.Int64UpDownCounter("orders.active")
+inFlight.Add(ctx, 1)
+defer inFlight.Add(ctx, -1)
+
+// Synchronous Histogram (latency / distribution)
+hist, _ := meter.Float64Histogram("orders.amount.usd")
+hist.Record(ctx, totalAmount)
+
+// Asynchronous Observable Gauge (runtime stats)
+meter.Int64ObservableGauge("system.memory.heap_alloc_bytes",
+    metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+        var m runtime.MemStats
+        runtime.ReadMemStats(&m)
+        obs.Observe(int64(m.HeapAlloc))
+        return nil
+    }),
+)
+```
+
+---
+
+### 4. OpenTelemetry Collector Pipeline (`otel-collector-config.yaml`)
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+processors:
+  batch: { timeout: 1s, send_batch_size: 256 }
+  memory_limiter: { check_interval: 1s, limit_percentage: 75 }
+
+exporters:
+  debug: { verbosity: detailed }
+  otlp/jaeger: { endpoint: jaeger:4317, tls: { insecure: true } }
+  prometheus: { endpoint: "0.0.0.0:8889", namespace: "app" }
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]
+```
+
+---
+
+## 🧪 Testing and Verification
+
+To verify that the entire pipeline is working:
+```bash
+# 1. Build project
+make build
+
+# 2. Check health endpoint
+curl http://localhost:8080/health
+
+# 3. Create a manual order
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "cust-demo-1",
+    "payment_method": "credit_card",
+    "items": [{"sku": "KEYBOARD-RGB", "quantity": 1, "price": 120.00}]
+  }'
+```
