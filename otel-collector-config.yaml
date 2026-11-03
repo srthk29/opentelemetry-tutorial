@@ -1,0 +1,52 @@
+# OpenTelemetry Collector Configuration for Docker Compose Environment
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+exporters:
+  # Debug exporter prints spans, metrics, and logs in human-readable format
+  debug:
+    verbosity: detailed
+
+  # Jaeger accepts OTLP traces directly on gRPC port 4317
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Prometheus exporter exposes a scrape endpoint at :8889/metrics
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "app"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]
+  telemetry:
+    logs:
+      level: info

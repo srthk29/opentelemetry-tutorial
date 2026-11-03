@@ -1,0 +1,41 @@
+# OpenTelemetry Collector Configuration for Local Development
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 64
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+exporters:
+  # Debug exporter prints detailed spans, metrics, and attributes to collector console
+  debug:
+    verbosity: detailed
+
+  # Prometheus exporter serves metrics at http://localhost:8889/metrics
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "app"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]
+  telemetry:
+    logs:
+      level: info
