@@ -7,3 +7,4 @@ bin/
 # Temporary files
 *.tmp
 *.log
+*.db
