@@ -1,11 +1,30 @@
 version: '3.8'
 
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: ecommerce_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
   # OpenTelemetry Collector
   # Receives traces and metrics from Go application via OTLP (gRPC :4317, HTTP :4318),
   # processes them (batching, memory limiter), and exports them to Jaeger and Prometheus.
   otel-collector:
     image: otel/opentelemetry-collector:0.164.0
+    container_name: otel-collector
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
@@ -20,15 +39,20 @@ services:
   # Jaeger All-in-One: Distributed Tracing UI & Backend
   jaeger:
     image: jaegertracing/all-in-one:latest
+    container_name: jaeger
     ports:
       - "16686:16686" # Jaeger Web UI (http://localhost:16686)
 
   # Prometheus: Metrics Storage & Query UI
   prometheus:
     image: prom/prometheus:latest
+    container_name: prometheus
     volumes:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"   # Prometheus Web UI (http://localhost:9090)
     depends_on:
       - otel-collector
+
+volumes:
+  pgdata:
