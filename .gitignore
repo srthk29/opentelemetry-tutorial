@@ -1,0 +1,9 @@
+# Binaries
+bin/
+
+# OS files
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
