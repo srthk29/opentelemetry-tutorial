@@ -85,6 +85,13 @@ A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry
 │   ├── domain/                      # 🛡️ PURE BUSINESS DOMAIN (ZERO OpenTelemetry imports!)
 │   │   ├── order.go                 # Pure domain models, validation, and business logic
 │   │   └── order_test.go            # Ultra-fast pure domain unit tests (no OTel setup)
+│   ├── storage/                     # 🗄️ DATABASE IMPLEMENTATIONS & OTel INTEGRATIONS
+│   │   ├── sqlite/                  # SQLite (Pure-Go modernc.org/sqlite + otelsql)
+│   │   │   ├── sqlite.go
+│   │   │   └── sqlite_test.go
+│   │   └── postgres/                # PostgreSQL (Both otelsql and native otelpgx!)
+│   │       ├── otelsql.go           # Approach A: Unified database/sql + otelsql
+│   │       └── otelpgx.go           # Approach B: Native pgxpool.Pool + otelpgx
 │   ├── telemetry/                   # 🔌 INFRASTRUCTURE & TELEMETRY ADAPTERS
 │   │   ├── telemetry.go             # OTel SDK bootstrap (TracerProvider, MeterProvider, Resource, Shutdown)
 │   │   ├── metrics_adapter.go       # Adapter implementing domain.MetricsRecorder port via OTel
@@ -306,6 +313,82 @@ func TestPureOrderService_Unit(t *testing.T) {
     assert.NoError(t, err)
     assert.Equal(t, 60.0, order.TotalAmount)
 }
+```
+
+---
+
+## 🗄️ Database OpenTelemetry Instrumentation (SQLite & PostgreSQL)
+
+The project provides three database implementations for `domain.OrderRepository`, demonstrating how OpenTelemetry traces database calls, multi-statement transactions, and connection pool metrics.
+
+### 1. SQLite (`modernc.org/sqlite` + `otelsql`)
+* **Pure-Go Driver**: `modernc.org/sqlite` requires **no CGO** or C compiler.
+* **Unified `otelsql` Wrapper**: Wraps the standard Go `database/sql` driver.
+* **Normalized Tables**: `orders` and `order_items` tables with foreign keys and multi-statement transaction tracing.
+* **Trace Output**: Spans for `sql.tx.begin`, `sql.stmt.exec` (`INSERT INTO orders`), `sql.stmt.exec` (`INSERT INTO order_items`), and `sql.tx.commit`.
+* **Connection Pool Metrics**: Tracks open, idle, in-use connections, and wait latencies.
+
+```go
+// Open SQLite with OpenTelemetry tracing
+db, err := otelsql.Open("sqlite", dsn,
+    otelsql.WithAttributes(semconv.DBSystemSqlite, semconv.DBNamespace(dsn)),
+    otelsql.WithSQLCommenter(true), // Injects W3C tracecontext into SQL comments!
+)
+// Register DBStats connection pool metrics with OpenTelemetry
+metricReg, err := otelsql.RegisterDBStatsMetrics(db, otelsql.WithAttributes(semconv.DBSystemSqlite))
+```
+
+---
+
+### 2. PostgreSQL Approach A: Unified `database/sql` + `otelsql` (`internal/storage/postgres/otelsql.go`)
+* Uses `github.com/jackc/pgx/v5/stdlib` with `otelsql`.
+* Identical API experience to SQLite, making multi-database codebases uniform.
+* Automatic statement sanitization and parameter logging.
+
+```go
+db, err := otelsql.Open("pgx", dsn,
+    otelsql.WithAttributes(semconv.DBSystemPostgreSQL, semconv.DBNamespace(dsn)),
+    otelsql.WithSQLCommenter(true),
+)
+```
+
+---
+
+### 3. PostgreSQL Approach B: Native `pgxpool.Pool` + `otelpgx` (`internal/storage/postgres/otelpgx.go`)
+* Uses high-performance native `pgxpool.Pool` with `github.com/exaring/otelpgx`.
+* Preferred for high-throughput production Go services using native `pgx` features (batching, binary protocol).
+* Attaches `otelpgx.NewTracer()` directly to the pgx connection configuration:
+
+```go
+config, err := pgxpool.ParseConfig(connString)
+// Attach OTel Tracer directly to pgxpool
+config.ConnConfig.Tracer = otelpgx.NewTracer(
+    otelpgx.WithQuerySpanNamePrefix(), // Formats spans as "DB: SELECT orders", etc.
+)
+pool, err := pgxpool.NewWithConfig(ctx, config)
+
+// Record native connection pool stats as OpenTelemetry metrics
+otelpgx.RecordStats(pool)
+```
+
+---
+
+### 🔄 Switching Storage Backends
+
+Switch seamlessly using the `-db` flag or `DB_TYPE` environment variable:
+
+```bash
+# In-Memory
+make run-server DB_TYPE=memory
+
+# SQLite (default)
+make run-server-sqlite
+
+# PostgreSQL via unified otelsql (Approach A)
+make run-server-postgres-sql
+
+# PostgreSQL via native otelpgx (Approach B)
+make run-server-postgres-pgx
 ```
 
 ---

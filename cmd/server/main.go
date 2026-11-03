@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/sarthak/opentelemetry-tutorial/internal/domain"
+	"github.com/sarthak/opentelemetry-tutorial/internal/storage/postgres"
+	"github.com/sarthak/opentelemetry-tutorial/internal/storage/sqlite"
 	"github.com/sarthak/opentelemetry-tutorial/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,6 +29,8 @@ func main() {
 	exporterType := flag.String("exporter", "otlp", "Telemetry exporter: 'otlp' (Collector) or 'stdout' (Console)")
 	collectorEndpoint := flag.String("collector-addr", "localhost:4317", "OTLP gRPC collector address")
 	serviceName := flag.String("service-name", "order-service", "Service name for OpenTelemetry resource")
+	dbType := flag.String("db", "sqlite", "Storage backend: 'sqlite', 'postgres-sql', 'postgres-pgx', or 'memory'")
+	dbDSN := flag.String("db-dsn", "", "Database DSN/connection string")
 	flag.Parse()
 
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -41,9 +45,15 @@ func main() {
 	if envSvc := os.Getenv("OTEL_SERVICE_NAME"); envSvc != "" {
 		*serviceName = envSvc
 	}
+	if envDB := os.Getenv("DB_TYPE"); envDB != "" {
+		*dbType = envDB
+	}
+	if envDSN := os.Getenv("DB_DSN"); envDSN != "" {
+		*dbDSN = envDSN
+	}
 
-	log.Printf("Starting %s with exporter=%s, collector=%s, port=%d\n",
-		*serviceName, *exporterType, *collectorEndpoint, *port)
+	log.Printf("Starting %s with exporter=%s, collector=%s, port=%d, db=%s\n",
+		*serviceName, *exporterType, *collectorEndpoint, *port, *dbType)
 
 	// 2. Initialize OpenTelemetry SDK (TracerProvider, MeterProvider, Propagators)
 	ctx := context.Background()
@@ -56,22 +66,69 @@ func main() {
 		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}
 
-	// 3. Clean Architecture Composition:
-	// A. Create Metrics Adapter (Adapter for domain.MetricsRecorder port)
+	// 3. Initialize Storage Backend (with OpenTelemetry instrumentation)
+	var orderRepo domain.OrderRepository
+	switch *dbType {
+	case "sqlite":
+		dsn := *dbDSN
+		if dsn == "" {
+			dsn = "orders.db"
+		}
+		repo, err := sqlite.New(ctx, dsn)
+		if err != nil {
+			log.Fatalf("Failed to initialize SQLite repository: %v", err)
+		}
+		defer repo.Close()
+		orderRepo = repo
+		log.Printf("✓ Storage: SQLite (otelsql) connected -> %s\n", dsn)
+
+	case "postgres-sql":
+		dsn := *dbDSN
+		if dsn == "" {
+			dsn = "postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable"
+		}
+		repo, err := postgres.NewSQLRepository(ctx, dsn)
+		if err != nil {
+			log.Fatalf("Failed to initialize Postgres SQL repository: %v", err)
+		}
+		defer repo.Close()
+		orderRepo = repo
+		log.Printf("✓ Storage: PostgreSQL (Approach A: otelsql + pgx/stdlib) connected -> %s\n", dsn)
+
+	case "postgres-pgx":
+		dsn := *dbDSN
+		if dsn == "" {
+			dsn = "postgres://postgres:postgrespassword@localhost:5432/ecommerce_db?sslmode=disable"
+		}
+		repo, err := postgres.NewPGXPoolRepository(ctx, dsn)
+		if err != nil {
+			log.Fatalf("Failed to initialize Postgres pgxpool repository: %v", err)
+		}
+		defer repo.Close()
+		orderRepo = repo
+		log.Printf("✓ Storage: PostgreSQL (Approach B: native pgxpool + otelpgx) connected -> %s\n", dsn)
+
+	case "memory":
+		fallthrough
+	default:
+		orderRepo = domain.NewInMemoryOrderRepository()
+		log.Println("✓ Storage: In-Memory repository")
+	}
+
+	// 4. Clean Architecture Composition:
+	// A. Create Metrics Adapter (implements domain.MetricsRecorder port)
 	metricsAdapter, err := telemetry.NewOTelMetricsAdapter()
 	if err != nil {
 		log.Fatalf("Failed to create metrics adapter: %v", err)
 	}
 
-	// B. Create Pure Domain Service (100% Free of any OpenTelemetry imports!)
-	orderRepo := domain.NewInMemoryOrderRepository()
+	// B. Create Pure Domain Service (100% Free of OpenTelemetry imports!)
 	pureOrderService := domain.NewPureOrderService(orderRepo, metricsAdapter)
 
 	// C. Wrap with Telemetry Decorator (Decorator Pattern)
-	// Both pureOrderService and instrumentedOrderService implement domain.OrderService!
 	var orderService domain.OrderService = telemetry.NewInstrumentedOrderService(pureOrderService, metricsAdapter)
 
-	// 4. Configure HTTP Routes
+	// 5. Configure HTTP Routes
 	mux := http.NewServeMux()
 
 	// Health Check
@@ -148,7 +205,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(order)
 	})
 
-	// 5. Wrap HTTP Handler with otelhttp to automatically trace inbound HTTP requests
+	// 6. Wrap HTTP Handler with otelhttp to automatically trace inbound HTTP requests
 	otelHandler := otelhttp.NewHandler(mux, "http.server",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
@@ -160,7 +217,7 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	// 6. Graceful Server Lifecycle Management
+	// 7. Graceful Server Lifecycle Management
 	serverErrChan := make(chan error, 1)
 	go func() {
 		log.Printf("Order API server listening on http://localhost:%d\n", *port)
