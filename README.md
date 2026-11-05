@@ -81,7 +81,8 @@ A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry
 ├── cmd/
 │   ├── server/main.go               # Instrumented HTTP Server (Order API)
 │   ├── client/main.go               # Instrumented Client Simulator (Sends test traffic)
-│   └── pipeline/main.go             # ⚡ Multi-Stage AI Pipeline Simulator (Transcript->Chunking->Embeddings->Summarizer)
+│   ├── pipeline/main.go             # ⚡ Single-Item AI Pipeline (Transcript->Chunking->Embeddings->Summarizer)
+│   └── localai/main.go              # 🧠 Local AI Staged Batch Pipeline (Memory-constrained single-model swapping)
 ├── internal/
 │   ├── domain/                      # 🛡️ PURE BUSINESS DOMAIN (ZERO OpenTelemetry imports!)
 │   │   ├── order.go                 # Pure domain models, validation, and business logic
@@ -97,6 +98,18 @@ A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry
 │   │   │   ├── chunking.go          # Text chunking stage
 │   │   │   ├── embeddings.go        # Vector embeddings stage
 │   │   │   └── summarizer.go        # LLM summarization stage
+│   │   ├── modelmanager/            # 🧠 Model Lifecycle & VRAM Resource Management
+│   │   │   ├── modelmanager.go      # Single-model residency manager with load/unload spans & VRAM gauge
+│   │   │   └── modelmanager_test.go # ModelManager lifecycle tests
+│   │   ├── batch/                   # 📦 Memory-Constrained Staged Batch Pipeline
+│   │   │   ├── types.go             # DocumentItem, ChunkItem, BatchFilterParams
+│   │   │   ├── engines.go           # Pure inference engines (Llama, BGE)
+│   │   │   ├── engine_decorators.go # GenAI spans (pipeline.chunk.summarize, pipeline.chunk.embed)
+│   │   │   ├── metrics.go           # Batch metrics (stage durations, item counts, token usage)
+│   │   │   ├── decorator.go         # BatchTelemetryDecorator (pipeline.stage.<name>.batch parent spans)
+│   │   │   ├── orchestrator.go      # Staged Batch Orchestrator
+│   │   │   ├── batch_test.go        # Batch pipeline integration tests
+│   │   │   └── stages/              # Pure batch stages (chunking, summarizer, embeddings)
 │   │   └── pipeline_test.go         # Pipeline integration & unit tests
 │   ├── storage/                     # 🗄️ DATABASE IMPLEMENTATIONS & OTel INTEGRATIONS
 │   │   ├── sqlite/                  # SQLite (Pure-Go modernc.org/sqlite + otelsql)
@@ -510,6 +523,63 @@ make run-pipeline
 
 # Option 2: Run with OpenTelemetry Collector
 make run-pipeline-collector
+```
+
+---
+
+## 🧠 Local AI Memory-Constrained Staged Batch Pipeline
+
+When deploying AI applications on edge hardware or local workstations (using **llama.cpp**, **whisper.cpp**, or local embeddings), system memory and VRAM are strictly limited:
+
+1. **Memory Invariant**: Only **one** heavy model can reside in VRAM/unified memory at a time.
+2. **Problem with Item-by-Item Pipelines**: Processing item-by-item forces swapping models back and forth for every single document (Whisper ➔ Llama ➔ BGE ➔ Whisper ➔ Llama ➔ BGE), incurring seconds of SSD-to-VRAM disk I/O latency for each document.
+3. **The Solution (Bulk Staged Processing)**:
+   - **Chunking Stage**: Runs pure CPU segmentation across **all** documents.
+   - **Summarizer Stage**: Loads the 8B LLM (`llama-3-8b-instruct.gguf`, 4.5 GB) into VRAM **once**, summarizes **all** chunks across all documents, and unloads the model.
+   - **Embeddings Stage**: Loads the embedding model (`bge-large-en-v1.5.gguf`, 1.3 GB) into VRAM **once**, vectorizes **all** chunks across all documents, and unloads the model.
+
+### 📐 Local AI Tracing Hierarchy
+
+```
+pipeline.workflow: local-ai-staged-workflow (Root Trace)
+  ├── pipeline.stage.chunking.batch
+  │     (pure CPU string segmentation across 3 docs -> 5 chunks)
+  ├── pipeline.stage.summarizer.batch
+  │     ├── ai.model.load (llama-3-8b-instruct.gguf, 4.5 GB, metal)
+  │     ├── pipeline.chunk.summarize [doc-001, chunk-0] (tokens: 38 in, 24 out)
+  │     ├── pipeline.chunk.summarize [doc-001, chunk-1] (tokens: 42 in, 28 out)
+  │     ├── pipeline.chunk.summarize [doc-002, chunk-0] (tokens: 35 in, 22 out)
+  │     ├── ... (all chunks processed in bulk)
+  │     └── ai.model.unload (llama-3-8b-instruct.gguf, freed 4.5 GB)
+  └── pipeline.stage.embeddings.batch
+        ├── ai.model.load (bge-large-en-v1.5.gguf, 1.3 GB, metal)
+        ├── pipeline.chunk.embed [doc-001, chunk-0] (dims: 768, input_tokens: 38)
+        ├── pipeline.chunk.embed [doc-001, chunk-1] (dims: 768, input_tokens: 42)
+        ├── pipeline.chunk.embed [doc-002, chunk-0] (dims: 768, input_tokens: 35)
+        ├── ... (all chunks embedded in bulk)
+        └── ai.model.unload (bge-large-en-v1.5.gguf, freed 1.3 GB)
+```
+
+### 📊 Standard Metrics for Local AI Pipelines
+
+| Metric Name | Type | Description | Key Attributes / Labels |
+| :--- | :--- | :--- | :--- |
+| `ai.model.vram_allocated_bytes` | UpDownCounter | Current memory/VRAM occupied by active model | `model.name`, `device.type` (metal/cuda/cpu) |
+| `ai.model.load_duration_ms` | Histogram | Latency to load model weights into VRAM | `model.name`, `device.type` |
+| `ai.model.loads_total` | Counter | Total model load / swap operations | `model.name`, `device.type` |
+| `ai.model.unloads_total` | Counter | Total model eviction operations | `model.name`, `device.type` |
+| `pipeline.batch.stage.duration_ms` | Histogram | Latency of the bulk batch stage | `pipeline.stage`, `status` |
+| `pipeline.batch.chunk.duration_ms` | Histogram | Latency of individual chunk inference | `gen_ai.request.model`, `gen_ai.operation.name` |
+| `gen_ai.client.token.usage` | Counter | Input and output token counts | `gen_ai.request.model`, `gen_ai.token.type` (input/output) |
+
+### 🚀 Running the Local AI Demo
+
+```bash
+# Run standalone with console STDOUT exporter:
+make run-localai
+
+# Run with OpenTelemetry Collector + Jaeger:
+make run-localai-collector
 ```
 
 ---
