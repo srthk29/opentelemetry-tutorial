@@ -80,11 +80,24 @@ A comprehensive, production-grade tutorial project demonstrating **OpenTelemetry
 ```
 ├── cmd/
 │   ├── server/main.go               # Instrumented HTTP Server (Order API)
-│   └── client/main.go               # Instrumented Client Simulator (Sends test traffic)
+│   ├── client/main.go               # Instrumented Client Simulator (Sends test traffic)
+│   └── pipeline/main.go             # ⚡ Multi-Stage AI Pipeline Simulator (Transcript->Chunking->Embeddings->Summarizer)
 ├── internal/
 │   ├── domain/                      # 🛡️ PURE BUSINESS DOMAIN (ZERO OpenTelemetry imports!)
 │   │   ├── order.go                 # Pure domain models, validation, and business logic
 │   │   └── order_test.go            # Ultra-fast pure domain unit tests (no OTel setup)
+│   ├── pipeline/                    # ⚡ MULTI-STAGE PIPELINE OTel INSTRUMENTATION
+│   │   ├── types.go                 # Pipeline interface definition
+│   │   ├── request/request.go       # FilterParams & PipelineStage state container
+│   │   ├── metrics.go               # Standard Pipeline & GenAI token metrics
+│   │   ├── decorator.go             # Generic Telemetry Decorator wrapping ANY Pipeline stage
+│   │   ├── orchestrator.go          # Pipeline Orchestrator running stages under parent span
+│   │   ├── stages/                  # Pure Stages (ZERO OTel code!)
+│   │   │   ├── transcript.go        # Speech-to-text stage
+│   │   │   ├── chunking.go          # Text chunking stage
+│   │   │   ├── embeddings.go        # Vector embeddings stage
+│   │   │   └── summarizer.go        # LLM summarization stage
+│   │   └── pipeline_test.go         # Pipeline integration & unit tests
 │   ├── storage/                     # 🗄️ DATABASE IMPLEMENTATIONS & OTel INTEGRATIONS
 │   │   ├── sqlite/                  # SQLite (Pure-Go modernc.org/sqlite + otelsql)
 │   │   │   ├── sqlite.go
@@ -404,6 +417,100 @@ make run-server-postgres-pgx
 > ```bash
 > go run ./cmd/server -db=postgres-sql -db-dsn="postgres://$(whoami)@localhost:5432/postgres?sslmode=disable"
 > ```
+
+---
+
+## ⚡ Multi-Stage Pipelines & GenAI Semantic Conventions (`internal/pipeline`)
+
+For multi-stage data processing systems (such as AI, NLP, Audio/Video, or RAG pipelines), each stage typically implements a standard interface:
+
+```go
+type Pipeline interface {
+    Name() string
+    Stage() request.PipelineStage
+    Run(context.Context, *request.FilterParams) error
+}
+```
+
+### 1. Standard OpenTelemetry Signals for Pipelines
+
+| Category | Signal Name | Type | Description / Attributes |
+| :--- | :--- | :--- | :--- |
+| **Workflow Trace** | `pipeline.workflow: <name>` | Parent Span | Encompasses the entire multi-stage pipeline run. Attributes: `pipeline.workflow.name`, `stage_count`, `request_id`, `document_id`. |
+| **Stage Trace** | `pipeline.stage.<stage>` | Child Span | Nested child span for each stage (`pipeline.stage.transcript`, `pipeline.stage.chunking`, etc.). |
+| **Workflow Runs** | `pipeline.workflow.runs_total` | Counter | Total workflow executions (`status=success\|failed`, `workflow_name`). |
+| **Workflow Latency**| `pipeline.workflow.duration_ms` | Histogram | End-to-end processing latency. |
+| **Workflow In-Flight**| `pipeline.workflow.active` | UpDownCounter | Current number of concurrently running pipelines. |
+| **Stage Runs** | `pipeline.stage.runs_total` | Counter | Executions per stage (`pipeline.stage`, `status`, `error.type`). |
+| **Stage Latency** | `pipeline.stage.duration_ms` | Histogram | Latency distribution per stage (identifies bottlenecks). |
+| **Data Volume** | `pipeline.items.processed_total`| Counter | Data items produced (`item.type=words\|chunks\|vectors`). |
+| **GenAI Tokens** | `gen_ai.client.token.usage` | Counter | **OTel GenAI Standard**: Token counts (`gen_ai.token.type=input\|output`, `gen_ai.request.model`). |
+
+---
+
+### 2. The Generic Decorator: Zero OTel Code in Stages
+
+Instead of adding OpenTelemetry code into `TranscriptPipeline`, `ChunkingPipeline`, `EmbeddingPipeline`, or `SummarizerPipeline`, we wrap each stage with [`pipeline.Wrap`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/pipeline/decorator.go#L33):
+
+```go
+// internal/pipeline/decorator.go
+type TelemetryDecorator struct {
+    next    Pipeline
+    tracer  trace.Tracer
+    metrics *Metrics
+}
+
+func (d *TelemetryDecorator) Run(ctx context.Context, params *request.FilterParams) error {
+    ctx, span := d.tracer.Start(ctx, fmt.Sprintf("pipeline.stage.%s", d.Stage()), ...)
+    defer span.End()
+
+    // 1. Execute pure stage business logic
+    err := d.next.Run(ctx, params)
+    
+    // 2. Automatically record errors, durations, and GenAI semantic conventions
+    if err != nil {
+        span.RecordError(err)
+        span.SetStatus(codes.Error, err.Error())
+        return err
+    }
+    
+    // 3. Extract metadata (model, tokens, chunks) and enrich OTel attributes
+    d.enrichTelemetry(ctx, span, params)
+    return nil
+}
+```
+
+---
+
+### 3. OpenTelemetry GenAI Semantic Conventions
+
+For embedding and LLM generation stages, the decorator translates stage metadata into **official OpenTelemetry GenAI attributes**:
+
+* **Embeddings Stage (`pipeline.stage.embeddings`)**:
+  * `gen_ai.operation.name = "embeddings"`
+  * `gen_ai.system = "openai"`
+  * `gen_ai.request.model = "text-embedding-3-small"`
+  * `gen_ai.usage.input_tokens = 82`
+  * `embedding.dimensions = 1536`
+  * `embedding.vector_count = 3`
+* **Summarizer / Chat Stage (`pipeline.stage.summarizer`)**:
+  * `gen_ai.operation.name = "chat"`
+  * `gen_ai.system = "google"`
+  * `gen_ai.request.model = "gemini-1.5-pro"`
+  * `gen_ai.usage.input_tokens = 84`
+  * `gen_ai.usage.output_tokens = 46`
+
+---
+
+### 4. Running the Pipeline Demo
+
+```bash
+# Option 1: Run directly in terminal (inspect JSON spans & GenAI token metrics)
+make run-pipeline
+
+# Option 2: Run with OpenTelemetry Collector
+make run-pipeline-collector
+```
 
 ---
 
