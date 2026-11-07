@@ -234,6 +234,28 @@ make docker-down
 
 ---
 
+### Option D: Native Standalone on macOS (Zero Docker: Jaeger + Prometheus)
+
+For macOS users who do not have Docker installed or prefer native Apple Silicon / Intel Darwin binaries:
+
+* **Detailed Guide**: [`monitoring/README.md`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/monitoring/README.md) & [`docs/PROMETHEUS_AND_JAEGER_MAC_GUIDE.md`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/docs/PROMETHEUS_AND_JAEGER_MAC_GUIDE.md)
+
+```bash
+# Terminal 1: Run native Jaeger All-in-One (UI at http://localhost:16686)
+make run-jaeger
+
+# Terminal 2: Run native Prometheus (UI at http://localhost:9090)
+make run-prometheus
+
+# Terminal 3: Run OpenTelemetry Collector (:4317 gRPC, :8889 Prometheus metrics)
+make run-collector
+
+# Terminal 4: Run application
+make run-localai-collector
+```
+
+---
+
 ## 🛡️ Solving Telemetry Pollution in Business Logic
 
 A common concern when adopting OpenTelemetry is **code pollution**: `tracer.Start()`, `span.SetAttributes()`, and `counter.Add()` calls polluting pure business logic, violating the **Single Responsibility Principle** and making unit testing noisy.

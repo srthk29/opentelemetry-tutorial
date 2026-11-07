@@ -1,9 +1,11 @@
-.PHONY: help build run-server run-server-sqlite run-server-postgres-sql run-server-postgres-pgx run-server-stdout run-client run-pipeline run-pipeline-collector run-localai run-localai-collector run-collector docker-up docker-down clean
+.PHONY: help build run-server run-server-sqlite run-server-postgres-sql run-server-postgres-pgx run-server-stdout run-client run-pipeline run-pipeline-collector run-localai run-localai-collector run-collector run-jaeger run-prometheus docker-up docker-down clean
 
 help:
 	@echo "Available commands:"
 	@echo "  make build                     - Compile server, client, pipeline, and localai binaries"
 	@echo "  make run-collector             - Run standalone local OpenTelemetry Collector"
+	@echo "  make run-jaeger                - Run native standalone Jaeger UI (:16686) on macOS"
+	@echo "  make run-prometheus            - Run native standalone Prometheus (:9090) on macOS"
 	@echo "  make run-server                - Run API server with default SQLite storage"
 	@echo "  make run-server-sqlite         - Run API server with SQLite (otelsql)"
 	@echo "  make run-server-postgres-sql   - Run API server with PostgreSQL (Approach A: otelsql)"
@@ -41,6 +43,12 @@ run-localai-collector:
 run-collector:
 	./scripts/run-local-collector.sh
 
+run-jaeger:
+	./scripts/run-local-jaeger.sh
+
+run-prometheus:
+	./scripts/run-local-prometheus.sh
+
 run-server: run-server-sqlite
 
 run-server-sqlite:
@@ -70,4 +78,4 @@ docker-down:
 	docker compose down
 
 clean:
-	rm -rf bin/server bin/client bin/pipeline bin/localai *.db
+	rm -rf bin/server bin/client bin/pipeline bin/localai bin/prom_data *.db

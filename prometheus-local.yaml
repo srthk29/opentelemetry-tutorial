@@ -1,0 +1,10 @@
+# Prometheus configuration for Native macOS Local Execution (Outside Docker)
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Scrapes metrics emitted by the local OpenTelemetry Collector
+  - job_name: "otel-collector-local"
+    static_configs:
+      - targets: ["localhost:8889"]
