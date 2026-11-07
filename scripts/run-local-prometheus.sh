@@ -27,7 +27,7 @@ else
         exit 1
     fi
 
-    VERSION="3.1.0"
+    VERSION="3.16.0"
     TAR_NAME="prometheus-${VERSION}.darwin-${PROM_ARCH}.tar.gz"
     URL="https://github.com/prometheus/prometheus/releases/download/v${VERSION}/${TAR_NAME}"
 

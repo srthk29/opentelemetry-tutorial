@@ -21,14 +21,18 @@ if ! command -v "${JAEGER_BIN}" >/dev/null 2>&1; then
         exit 1
     fi
 
-    VERSION="1.66.0"
+    VERSION="2.23.0"
     TAR_NAME="jaeger-${VERSION}-darwin-${JAEGER_ARCH}.tar.gz"
     URL="https://github.com/jaegertracing/jaeger/releases/download/v${VERSION}/${TAR_NAME}"
 
     echo "▶ Downloading Jaeger v${VERSION} for macOS (${JAEGER_ARCH})..."
     TMP_DIR=$(mktemp -d)
     curl -sL "${URL}" | tar -xz -C "${TMP_DIR}"
-    mv "${TMP_DIR}/jaeger-${VERSION}-darwin-${JAEGER_ARCH}/jaeger-all-in-one" "${JAEGER_BIN}"
+    if [ -f "${TMP_DIR}/jaeger-${VERSION}-darwin-${JAEGER_ARCH}/jaeger" ]; then
+        mv "${TMP_DIR}/jaeger-${VERSION}-darwin-${JAEGER_ARCH}/jaeger" "${JAEGER_BIN}"
+    elif [ -f "${TMP_DIR}/jaeger-${VERSION}-darwin-${JAEGER_ARCH}/jaeger-all-in-one" ]; then
+        mv "${TMP_DIR}/jaeger-${VERSION}-darwin-${JAEGER_ARCH}/jaeger-all-in-one" "${JAEGER_BIN}"
+    fi
     rm -rf "${TMP_DIR}"
     chmod +x "${JAEGER_BIN}"
 
