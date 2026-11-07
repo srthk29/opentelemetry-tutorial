@@ -15,6 +15,13 @@ service:
       processors: [memory_limiter, batch]
       exporters: [jaeger_storage_exporter]
 
+    # Metrics pipeline: Enables MetricsService on OTLP receiver (port 4317)
+    # This prevents 'Unimplemented unknown service MetricsService' errors from clients!
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [nop]
+
   # ----------------------------------------------------------------------------
   # Telemetry: Controls Jaeger's own internal Prometheus metrics & logging
   # ----------------------------------------------------------------------------
@@ -89,3 +96,7 @@ processors:
 exporters:
   jaeger_storage_exporter:
     trace_storage: local_memory # References the backend defined in jaeger_storage
+
+  # Silent discard for incoming metrics (prevents OTLP MetricsService gRPC errors)
+  # You can also use 'debug' (to print metrics) or 'prometheus' (to expose :8889)
+  nop: {}

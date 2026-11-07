@@ -64,6 +64,13 @@ service:
       processors: [memory_limiter, batch]
       exporters: [jaeger_storage_exporter]
 
+    # Metrics pipeline: Enables MetricsService on OTLP receiver (port 4317)
+    # Prevents "Unimplemented unknown service MetricsService" error from client SDKs!
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [nop]
+
   # ----------------------------------------------------------------------------
   # 1. Internal Telemetry: Prometheus Metrics & Component Logging
   # ----------------------------------------------------------------------------
@@ -137,6 +144,9 @@ processors:
 exporters:
   jaeger_storage_exporter:
     trace_storage: local_memory # References backend defined in jaeger_storage
+
+  # Silent discard for incoming metrics (absorbs OTLP MetricsService gRPC requests)
+  nop: {}
 ```
 
 ---
@@ -186,6 +196,46 @@ service:
 ```
 
 > **Why `level: none`?** Setting `level: none` stops the metric SDK from collecting internal counters, eliminating memory allocations and CPU overhead from meter evaluations.
+
+---
+
+### C. Troubleshooting: `failed to upload metrics: rpc error: code = Unimplemented desc = unknown service opentelemetry.proto.collector.metrics.v1.MetricsService`
+
+#### Why This Error Happens
+1. **Jaeger is a Distributed Tracing system, not a metrics store**.
+2. When an OpenTelemetry SDK has a Metric Exporter enabled (`otlpmetricgrpc`), it periodically calls the gRPC `MetricsService` (`opentelemetry.proto.collector.metrics.v1.MetricsService`) on port `4317`.
+3. If Jaeger's configuration only defines a `traces` pipeline, Jaeger's OTLP receiver **only registers `TraceService`** and ignores `MetricsService`.
+4. When your app tries to push metrics, Jaeger returns `Unimplemented (unknown service MetricsService)`.
+
+#### How to Fix It:
+* **Fix 1: Add a `metrics` pipeline with `nop` in `jaeger-v2-local.yaml` (Recommended for Jaeger v2)**:
+  Because Jaeger v2 is built on the OTel Collector, you can tell Jaeger to accept and safely drop or export client metrics:
+  ```yaml
+  exporters:
+    jaeger_storage_exporter:
+      trace_storage: local_memory
+    nop: {} # Or 'prometheus' to scrape at :8889
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [jaeger_storage_exporter]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [nop] # Tells Jaeger to accept MetricsService calls!
+  ```
+
+* **Fix 2: Route through OpenTelemetry Collector (Standard Production Architecture)**:
+  Do not point applications directly to Jaeger. Point applications to the OpenTelemetry Collector (`localhost:4317`), which routes traces to Jaeger (`otlp/jaeger`) and metrics to Prometheus (`prometheus: :8889`).
+
+* **Fix 3: Disable metric exporting in client application**:
+  If pointing directly to Jaeger, disable OTLP metric export in the client by setting:
+  ```bash
+  export OTEL_METRICS_EXPORTER=none
+  ```
 
 ---
 
