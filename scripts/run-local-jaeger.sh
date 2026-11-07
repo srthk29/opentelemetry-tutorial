@@ -4,6 +4,7 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${DIR}/bin"
 JAEGER_BIN="${BIN_DIR}/jaeger-all-in-one"
+CONFIG="${DIR}/jaeger-v2-local.yaml"
 
 mkdir -p "${BIN_DIR}"
 
@@ -48,11 +49,11 @@ echo " OTLP gRPC Receiver : localhost:4317 (or localhost:4319 if port busy)"
 echo " OTLP HTTP Receiver : localhost:4318"
 echo "=========================================================="
 
-# Check if port 4317 is already used by otelcol
-if lsof -Pi :4317 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "⚠️  Port 4317 is already in use (by OpenTelemetry Collector)."
-    echo "▶ Running Jaeger OTLP gRPC receiver on port 4319 to avoid conflict..."
-    exec "${JAEGER_BIN}" --collector.otlp.grpc.host-port="127.0.0.1:4319"
+if [ -f "${CONFIG}" ]; then
+    echo " Config             : ${CONFIG}"
+    echo "=========================================================="
+    exec "${JAEGER_BIN}" --config="${CONFIG}"
 else
+    echo "=========================================================="
     exec "${JAEGER_BIN}"
 fi
