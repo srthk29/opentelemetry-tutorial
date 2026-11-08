@@ -155,3 +155,86 @@ func TestInstrumentedGoogleGemmaIVSummarizer(t *testing.T) {
 		}
 	})
 }
+
+func TestInstrumentedOpenAISummarizer(t *testing.T) {
+	ctx := context.Background()
+
+	summaryMetrics, err := instrumented.NewSummaryMetrics(otel.Meter("test-openai-summarizer"))
+	if err != nil {
+		t.Fatalf("Failed to create summary metrics: %v", err)
+	}
+
+	summarizer, err := instrumented.NewInstrumentedOpenAISummarizer(ctx, "google/gemma-4-E4B-it-qat-q4_0-gguf", summaryMetrics)
+	if err != nil {
+		t.Fatalf("Failed to create instrumented OpenAI summarizer: %v", err)
+	}
+
+	if summarizer.Model() != "google/gemma-4-E4B-it-qat-q4_0-gguf" {
+		t.Errorf("Unexpected model: %s", summarizer.Model())
+	}
+
+	t.Run("GetSummary", func(t *testing.T) {
+		resp, err := summarizer.GetSummary(ctx, "OpenTelemetry traces and metrics integration with OpenAI API.")
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			t.Fatalf("Expected valid choices in response")
+		}
+		content, err := resp.Choices[0].Message.Content.AsChatCompletionResponseMessageContent0()
+		if err != nil {
+			t.Fatalf("Failed to extract content: %v", err)
+		}
+		if content == "" {
+			t.Errorf("Expected non-empty summary content")
+		}
+	})
+
+	t.Run("GetLongSummary", func(t *testing.T) {
+		resp, err := summarizer.GetLongSummary(ctx, "In-depth article on Large Language Model inference optimization.")
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			t.Fatalf("Expected valid choices in response")
+		}
+	})
+
+	t.Run("GetLongSummaryWithPromptVersion", func(t *testing.T) {
+		resp, err := summarizer.GetLongSummaryWithPromptVersion(ctx, "Technical prompt versioning test.", 1)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			t.Fatalf("Expected valid choices in response")
+		}
+	})
+
+	t.Run("GetMergedSummary", func(t *testing.T) {
+		texts := []string{
+			"Summary 1: Low-latency metric aggregation.",
+			"Summary 2: Span attributes and event logging.",
+		}
+		resp, err := summarizer.GetMergedSummary(ctx, texts)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			t.Fatalf("Expected valid choices in response")
+		}
+	})
+
+	t.Run("GetMergedLongSummary", func(t *testing.T) {
+		texts := []string{
+			"Doc 1: OpenTelemetry Collector pipelines.",
+			"Doc 2: Prometheus scraping exporters.",
+		}
+		resp, err := summarizer.GetMergedLongSummary(ctx, texts)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Choices) == 0 {
+			t.Fatalf("Expected valid choices in response")
+		}
+	})
+}
