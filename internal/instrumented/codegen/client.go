@@ -188,6 +188,101 @@ type RequestEditorFn func(ctx context.Context, req *http.Request) error
 // ClientWithResponsesInterface defines the interface expected by openAISummarizer.
 type ClientWithResponsesInterface interface {
 	CreateChatCompletionWithResponse(ctx context.Context, body ChatCompletionRequest, reqEditors ...RequestEditorFn) (*CreateChatCompletionResponse, error)
+	CreateEmbeddingWithResponse(ctx context.Context, body EmbeddingRequest, reqEditors ...RequestEditorFn) (*CreateEmbeddingResponse, error)
+}
+
+// Float represents the encoding format for embeddings.
+type Float string
+
+const (
+	EncodingFormatFloat  Float = "float"
+	EncodingFormatBase64 Float = "base64"
+)
+
+// EmbeddingRequest_Input represents either a single string or an array of strings.
+type EmbeddingRequest_Input struct {
+	single string
+	multi  []string
+}
+
+func (e *EmbeddingRequest_Input) FromEmbeddingRequestInput0(s string) error {
+	e.single = s
+	e.multi = nil
+	return nil
+}
+
+func (e *EmbeddingRequest_Input) FromEmbeddingRequestInput1(s []string) error {
+	e.multi = s
+	e.single = ""
+	return nil
+}
+
+func (e *EmbeddingRequest_Input) Texts() []string {
+	if len(e.multi) > 0 {
+		return e.multi
+	}
+	if e.single != "" {
+		return []string{e.single}
+	}
+	return nil
+}
+
+// EmbeddingRequest_Model represents the embedding model identifier.
+type EmbeddingRequest_Model struct {
+	value string
+}
+
+func (m *EmbeddingRequest_Model) FromEmbeddingRequestModel0(val string) error {
+	m.value = val
+	return nil
+}
+
+func (m EmbeddingRequest_Model) Value() string {
+	return m.value
+}
+
+// EmbeddingRequest represents the request body for /v1/embeddings.
+type EmbeddingRequest struct {
+	Dimensions     *int                   `json:"dimensions,omitempty"`
+	EncodingFormat *Float                 `json:"encoding_format,omitempty"`
+	Input          EmbeddingRequest_Input `json:"input"`
+	Model          EmbeddingRequest_Model `json:"model"`
+	User           *string                `json:"user,omitempty"`
+}
+
+// EmbeddingData represents an individual vector item in EmbeddingResponse.
+type EmbeddingData struct {
+	Object    string    `json:"object"`
+	Embedding []float32 `json:"embedding"`
+	Index     int       `json:"index"`
+}
+
+// EmbeddingUsage holds token usage statistics for embeddings.
+type EmbeddingUsage struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// EmbeddingResponse represents the standard OpenAI embedding response.
+type EmbeddingResponse struct {
+	Object string          `json:"object"`
+	Data   []EmbeddingData `json:"data"`
+	Model  string          `json:"model"`
+	Usage  EmbeddingUsage  `json:"usage"`
+}
+
+// CreateEmbeddingResponse represents the HTTP response wrapper from the generated client.
+type CreateEmbeddingResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EmbeddingResponse
+}
+
+func (r *CreateEmbeddingResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return ""
 }
 
 // defaultClient provides an HTTP or in-memory fallback implementation of ClientWithResponsesInterface.
@@ -283,6 +378,65 @@ func (c *defaultClient) CreateChatCompletionWithResponse(
 	}
 
 	return &CreateChatCompletionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: httpResp,
+		JSON200:      respObj,
+	}, nil
+}
+
+func (c *defaultClient) CreateEmbeddingWithResponse(
+	ctx context.Context,
+	body EmbeddingRequest,
+	reqEditors ...RequestEditorFn,
+) (*CreateEmbeddingResponse, error) {
+	modelName := body.Model.Value()
+	if modelName == "" {
+		modelName = "google/embeddinggemma-300m"
+	}
+	dims := 768
+	if body.Dimensions != nil && *body.Dimensions > 0 {
+		dims = *body.Dimensions
+	}
+
+	texts := body.Input.Texts()
+	data := make([]EmbeddingData, len(texts))
+	totalTokens := 0
+
+	for i, txt := range texts {
+		vec := make([]float32, dims)
+		for j := 0; j < dims; j++ {
+			vec[j] = float32(j%10) / 10.0
+		}
+		data[i] = EmbeddingData{
+			Object:    "embedding",
+			Embedding: vec,
+			Index:     i,
+		}
+		toks := len(txt) / 4
+		if toks == 0 {
+			toks = 1
+		}
+		totalTokens += toks
+	}
+
+	respObj := &EmbeddingResponse{
+		Object: "list",
+		Data:   data,
+		Model:  modelName,
+		Usage: EmbeddingUsage{
+			PromptTokens: totalTokens,
+			TotalTokens:  totalTokens,
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(respObj)
+	httpResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+	}
+
+	return &CreateEmbeddingResponse{
 		Body:         bodyBytes,
 		HTTPResponse: httpResp,
 		JSON200:      respObj,

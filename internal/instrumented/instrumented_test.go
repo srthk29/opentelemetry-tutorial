@@ -238,3 +238,104 @@ func TestInstrumentedOpenAISummarizer(t *testing.T) {
 		}
 	})
 }
+
+func TestInstrumentedOpenAIEmbeddingClient(t *testing.T) {
+	ctx := context.Background()
+
+	embeddingMetrics, err := instrumented.NewEmbeddingMetrics(otel.Meter("test-openai-embeddings"))
+	if err != nil {
+		t.Fatalf("Failed to create embedding metrics: %v", err)
+	}
+
+	client, err := instrumented.NewInstrumentedOpenAIEmbeddingClient(
+		ctx,
+		"google/embeddinggemma-300m",
+		768,
+		false,
+		embeddingMetrics,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create instrumented OpenAI embedding client: %v", err)
+	}
+
+	if client.GetModel() != "google/embeddinggemma-300m" {
+		t.Errorf("Unexpected model: %s", client.GetModel())
+	}
+	if client.GetDimensionality() != 768 {
+		t.Errorf("Unexpected dimensionality: %d", client.GetDimensionality())
+	}
+	if client.IsNormalized() != false {
+		t.Errorf("Unexpected normalized flag: %v", client.IsNormalized())
+	}
+
+	t.Run("GetEmbedding single text", func(t *testing.T) {
+		resp, err := client.GetEmbedding(ctx, "OpenTelemetry GenAI vector embeddings")
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Data) != 1 {
+			t.Fatalf("Expected 1 vector data result")
+		}
+		if len(resp.Data[0].Embedding) != 768 {
+			t.Errorf("Expected 768 dimensions, got %d", len(resp.Data[0].Embedding))
+		}
+	})
+
+	t.Run("GetEmbeddings batch texts", func(t *testing.T) {
+		texts := []string{
+			"Semantic search vectorization",
+			"Retrieval-Augmented Generation chunking",
+			"HNSW graph index distance metrics",
+		}
+		resp, err := client.GetEmbeddings(ctx, texts)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Data) != 3 {
+			t.Fatalf("Expected 3 vector data results")
+		}
+		for i, d := range resp.Data {
+			if len(d.Embedding) != 768 {
+				t.Errorf("Index %d: expected 768 dimensions, got %d", i, len(d.Embedding))
+			}
+		}
+	})
+
+	t.Run("GetQueryEmbedding with task type", func(t *testing.T) {
+		resp, err := client.GetQueryEmbedding(ctx, "What is OTel GenAI?", instrumented.TaskTypeRetrievalQuery)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Data) != 1 {
+			t.Fatalf("Expected 1 vector data result")
+		}
+	})
+
+	t.Run("GetDocumentEmbedding single document", func(t *testing.T) {
+		doc := &instrumented.Document{
+			Title:   "Tracing Spec",
+			Content: "Client spans must model outbound inference calls.",
+		}
+		resp, err := client.GetDocumentEmbedding(ctx, doc)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Data) != 1 {
+			t.Fatalf("Expected 1 vector data result")
+		}
+	})
+
+	t.Run("GetDocumentEmbeddings batch documents", func(t *testing.T) {
+		docs := []*instrumented.Document{
+			{Title: "Doc A", Content: "Metrics instruments for tokens and duration."},
+			{Title: "Doc B", Content: "Context propagation across distributed microservices."},
+		}
+		resp, err := client.GetDocumentEmbeddings(ctx, docs)
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if resp == nil || len(resp.Data) != 2 {
+			t.Fatalf("Expected 2 vector data results")
+		}
+	})
+}

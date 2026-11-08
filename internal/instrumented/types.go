@@ -23,20 +23,10 @@ type Document struct {
 	Content string `json:"content"`
 }
 
-// OpenAIEmbeddingResponse represents the standard OpenAI-compatible API response format.
-type OpenAIEmbeddingResponse struct {
-	Object string          `json:"object"`
-	Data   []EmbeddingData `json:"data"`
-	Model  string          `json:"model"`
-	Usage  Usage           `json:"usage"`
-}
-
-// EmbeddingData represents an individual vector item in the response.
-type EmbeddingData struct {
-	Object    string    `json:"object"`
-	Embedding []float32 `json:"embedding"`
-	Index     int       `json:"index"`
-}
+// OpenAIEmbeddingResponse aliases codegen.EmbeddingResponse for compatibility.
+type OpenAIEmbeddingResponse = codegen.EmbeddingResponse
+type EmbeddingData = codegen.EmbeddingData
+type EmbeddingUsage = codegen.EmbeddingUsage
 
 // Usage holds token consumption statistics returned by the GenAI provider.
 type Usage struct {
@@ -63,10 +53,13 @@ type ChatCompletionResponseContent = codegen.ChatCompletionResponseMessage_Conte
 
 // EmbedderWithEmbeddingResponse defines the low-level provider interface returning the raw response with token usage.
 type EmbedderWithEmbeddingResponse interface {
-	GetEmbedding(ctx context.Context, text string) (*OpenAIEmbeddingResponse, error)
-	GetEmbeddings(ctx context.Context, texts []string) (*OpenAIEmbeddingResponse, error)
+	GetEmbedding(ctx context.Context, text string) (*codegen.EmbeddingResponse, error)
+	GetEmbeddings(ctx context.Context, texts []string) (*codegen.EmbeddingResponse, error)
 	GetModel() string
 	GetDimensionality() int
+	GetQueryEmbedding(ctx context.Context, text string, taskType TaskType) (*codegen.EmbeddingResponse, error)
+	GetDocumentEmbedding(ctx context.Context, content *Document) (*codegen.EmbeddingResponse, error)
+	GetDocumentEmbeddings(ctx context.Context, contents []*Document) (*codegen.EmbeddingResponse, error)
 	IsNormalized() bool
 }
 
@@ -93,72 +86,4 @@ func PrepareDocument(title, content string) string {
 		return content
 	}
 	return fmt.Sprintf("title: %s | text: %s", title, content)
-}
-
-// mockOpenAIEmbeddingClient provides a default in-memory implementation for testing & fallback.
-type mockOpenAIEmbeddingClient struct {
-	model      string
-	dimensions int
-	normalized bool
-}
-
-// NewOpenAIEmbeddingClient creates an EmbedderWithEmbeddingResponse client.
-func NewOpenAIEmbeddingClient(ctx context.Context, model string, dimensions int, normalized bool) (EmbedderWithEmbeddingResponse, error) {
-	if dimensions <= 0 {
-		dimensions = 768
-	}
-	return &mockOpenAIEmbeddingClient{
-		model:      model,
-		dimensions: dimensions,
-		normalized: normalized,
-	}, nil
-}
-
-func (m *mockOpenAIEmbeddingClient) GetModel() string {
-	return m.model
-}
-
-func (m *mockOpenAIEmbeddingClient) GetDimensionality() int {
-	return m.dimensions
-}
-
-func (m *mockOpenAIEmbeddingClient) IsNormalized() bool {
-	return m.normalized
-}
-
-func (m *mockOpenAIEmbeddingClient) GetEmbedding(ctx context.Context, text string) (*OpenAIEmbeddingResponse, error) {
-	return m.GetEmbeddings(ctx, []string{text})
-}
-
-func (m *mockOpenAIEmbeddingClient) GetEmbeddings(ctx context.Context, texts []string) (*OpenAIEmbeddingResponse, error) {
-	data := make([]EmbeddingData, len(texts))
-	totalTokens := 0
-
-	for i, txt := range texts {
-		vec := make([]float32, m.dimensions)
-		for j := 0; j < m.dimensions; j++ {
-			vec[j] = float32(j%10) / 10.0
-		}
-		data[i] = EmbeddingData{
-			Object:    "embedding",
-			Embedding: vec,
-			Index:     i,
-		}
-		// Approximate 4 chars per token
-		tokens := len(txt) / 4
-		if tokens == 0 {
-			tokens = 1
-		}
-		totalTokens += tokens
-	}
-
-	return &OpenAIEmbeddingResponse{
-		Object: "list",
-		Data:   data,
-		Model:  m.model,
-		Usage: Usage{
-			PromptTokens: totalTokens,
-			TotalTokens:  totalTokens,
-		},
-	}, nil
 }
