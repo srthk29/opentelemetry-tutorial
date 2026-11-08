@@ -142,3 +142,68 @@ func NewSummaryMetrics(meter metric.Meter) (*SummaryMetrics, error) {
 		ActiveRequests:    activeRequests,
 	}, nil
 }
+
+// LaunchctlMetrics holds OpenTelemetry metric instruments for macOS launchctl service lifecycle.
+type LaunchctlMetrics struct {
+	// OperationDuration measures latency of launchctl invocations in milliseconds.
+	OperationDuration metric.Float64Histogram
+
+	// OperationsTotal measures total invocations split by action and status.
+	OperationsTotal metric.Int64Counter
+
+	// ActiveOperations tracks in-flight launchctl commands.
+	ActiveOperations metric.Int64UpDownCounter
+
+	// ServicesRunning tracks estimated services started (+1) and stopped (-1).
+	ServicesRunning metric.Int64UpDownCounter
+}
+
+// NewLaunchctlMetrics initializes the standard OpenTelemetry metrics for launchctl.
+func NewLaunchctlMetrics(meter metric.Meter) (*LaunchctlMetrics, error) {
+	if meter == nil {
+		meter = otel.Meter("service.launchctl")
+	}
+
+	operationDuration, err := meter.Float64Histogram(
+		"service.launchctl.operation.duration",
+		metric.WithDescription("Latency of launchctl operations in milliseconds"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.operation.duration: %w", err)
+	}
+
+	operationsTotal, err := meter.Int64Counter(
+		"service.launchctl.operations.total",
+		metric.WithDescription("Total number of launchctl operations performed"),
+		metric.WithUnit("{operation}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.operations.total: %w", err)
+	}
+
+	activeOperations, err := meter.Int64UpDownCounter(
+		"service.launchctl.active_operations",
+		metric.WithDescription("Number of active in-flight launchctl operations"),
+		metric.WithUnit("{operation}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.active_operations: %w", err)
+	}
+
+	servicesRunning, err := meter.Int64UpDownCounter(
+		"service.launchctl.services_running",
+		metric.WithDescription("Estimated count of running services managed via launchctl"),
+		metric.WithUnit("{service}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.services_running: %w", err)
+	}
+
+	return &LaunchctlMetrics{
+		OperationDuration: operationDuration,
+		OperationsTotal:   operationsTotal,
+		ActiveOperations:  activeOperations,
+		ServicesRunning:   servicesRunning,
+	}, nil
+}

@@ -2,6 +2,8 @@ package instrumented_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sarthak/opentelemetry-tutorial/internal/instrumented"
@@ -336,6 +338,83 @@ func TestInstrumentedOpenAIEmbeddingClient(t *testing.T) {
 		}
 		if resp == nil || len(resp.Data) != 2 {
 			t.Fatalf("Expected 2 vector data results")
+		}
+	})
+}
+
+func TestInstrumentedLaunchController(t *testing.T) {
+	ctx := context.Background()
+
+	metrics, err := instrumented.NewLaunchctlMetrics(otel.Meter("test-launchctl"))
+	if err != nil {
+		t.Fatalf("Failed to create launchctl metrics: %v", err)
+	}
+
+	// Create mock command runner to test without affecting system launchd
+	mockCommands := make([]string, 0)
+	mockRunner := func(cmdCtx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := name + " " + strings.Join(args, " ")
+		mockCommands = append(mockCommands, cmdStr)
+		if len(args) > 0 && args[0] == "print" {
+			return []byte("state = running\npid = 12345"), nil
+		}
+		return []byte("ok"), nil
+	}
+
+	baseController := instrumented.NewExecLaunchControllerWithRunner(mockRunner, "gui/501")
+	lc, err := instrumented.NewInstrumentedLaunchController(baseController, metrics)
+	if err != nil {
+		t.Fatalf("Failed to create instrumented launch controller: %v", err)
+	}
+
+	t.Run("Start and Stop lifecycle (user example pattern)", func(t *testing.T) {
+		out, startErr := lc.Start(ctx, "whisper")
+		if startErr != nil {
+			t.Fatalf("Expected success, got: %v", startErr)
+		}
+		if out != "ok" {
+			t.Errorf("Expected 'ok', got %q", out)
+		}
+
+		stopOut, stopErr := lc.Stop(ctx, "whisper")
+		if stopErr != nil {
+			t.Fatalf("Expected success, got: %v", stopErr)
+		}
+		if stopOut != "ok" {
+			t.Errorf("Expected 'ok', got %q", stopOut)
+		}
+	})
+
+	t.Run("Kickstart service", func(t *testing.T) {
+		out, kickErr := lc.Kickstart(ctx, "llama-server")
+		if kickErr != nil {
+			t.Fatalf("Expected success, got: %v", kickErr)
+		}
+		if out != "ok" {
+			t.Errorf("Expected 'ok', got %q", out)
+		}
+	})
+
+	t.Run("Print service status", func(t *testing.T) {
+		out, printErr := lc.Print(ctx, "whisper")
+		if printErr != nil {
+			t.Fatalf("Expected success, got: %v", printErr)
+		}
+		if !strings.Contains(out, "running") {
+			t.Errorf("Expected running state in output, got %q", out)
+		}
+	})
+
+	t.Run("Error propagation on command failure", func(t *testing.T) {
+		failingRunner := func(cmdCtx context.Context, name string, args ...string) ([]byte, error) {
+			return []byte("service not found"), fmt.Errorf("exit status 1")
+		}
+		errController := instrumented.NewExecLaunchControllerWithRunner(failingRunner, "")
+		errLc, _ := instrumented.NewInstrumentedLaunchController(errController, metrics)
+
+		_, err := errLc.Start(ctx, "nonexistent")
+		if err == nil {
+			t.Fatalf("Expected error, got nil")
 		}
 	})
 }
