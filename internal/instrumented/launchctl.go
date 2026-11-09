@@ -77,9 +77,10 @@ func (c *ExecLaunchController) Stop(ctx context.Context, serviceName string) (st
 }
 
 // Kickstart restarts or immediately activates the specified service via launchctl.
+// Passes -k to terminate existing instance and -p to print the spawned PID.
 func (c *ExecLaunchController) Kickstart(ctx context.Context, serviceName string) (string, error) {
 	target := c.target(serviceName)
-	out, err := c.runner(ctx, c.binaryPath, "kickstart", "-k", target)
+	out, err := c.runner(ctx, c.binaryPath, "kickstart", "-k", "-p", target)
 	return string(out), err
 }
 

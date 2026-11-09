@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sarthak/opentelemetry-tutorial/internal/instrumented"
 	"go.opentelemetry.io/otel"
@@ -358,7 +359,19 @@ func TestInstrumentedLaunchController(t *testing.T) {
 		if len(args) > 0 && args[0] == "print" {
 			return []byte("state = running\npid = 12345"), nil
 		}
+		if len(args) > 0 && args[0] == "kickstart" {
+			return []byte("service spawned with pid: 12345"), nil
+		}
 		return []byte("ok"), nil
+	}
+
+	mockPSRunner := func(cmdCtx context.Context, name string, args ...string) ([]byte, error) {
+		// Mock "ps ... | jc --ps"
+		if len(args) >= 2 && strings.Contains(args[1], "jc --ps") {
+			return []byte(`[{"rss":132940,"vsz":35345680,"cpu_percent":2.5,"mem_percent":1.2}]`), nil
+		}
+		// Mock plain ps output
+		return []byte(" %CPU %MEM   RSS      VSZ\n  2.5  1.2 132940 35345680"), nil
 	}
 
 	baseController := instrumented.NewExecLaunchControllerWithRunner(mockRunner, "gui/501")
@@ -366,6 +379,7 @@ func TestInstrumentedLaunchController(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create instrumented launch controller: %v", err)
 	}
+	lc.SetPSRunner(mockPSRunner)
 
 	t.Run("Start and Stop lifecycle (user example pattern)", func(t *testing.T) {
 		out, startErr := lc.Start(ctx, "whisper")
@@ -385,23 +399,73 @@ func TestInstrumentedLaunchController(t *testing.T) {
 		}
 	})
 
-	t.Run("Kickstart service", func(t *testing.T) {
+	t.Run("Kickstart service extracts spawned PID and snapshots CPU/Memory", func(t *testing.T) {
 		out, kickErr := lc.Kickstart(ctx, "llama-server")
 		if kickErr != nil {
 			t.Fatalf("Expected success, got: %v", kickErr)
 		}
-		if out != "ok" {
-			t.Errorf("Expected 'ok', got %q", out)
+		if !strings.Contains(out, "pid: 12345") {
+			t.Errorf("Expected spawned PID in output, got %q", out)
+		}
+
+		stats, statErr := lc.InspectProcessStats(ctx, 12345)
+		if statErr != nil {
+			t.Fatalf("Expected successful process stats inspection, got: %v", statErr)
+		}
+		if stats.CPUPercent != 2.5 {
+			t.Errorf("Expected 2.5 CPU%%, got %f", stats.CPUPercent)
+		}
+		if stats.MemPercent != 1.2 {
+			t.Errorf("Expected 1.2 Mem%%, got %f", stats.MemPercent)
+		}
+		if stats.RSSBytes != 132940*1024 {
+			t.Errorf("Expected %d RSS bytes, got %d", 132940*1024, stats.RSSBytes)
 		}
 	})
 
-	t.Run("Print service status", func(t *testing.T) {
+	t.Run("Hybrid background polling lifecycle", func(t *testing.T) {
+		lc.SetPollInterval(10 * time.Millisecond)
+
+		// Kickstart starts background poller for llama-server
+		_, err := lc.Kickstart(ctx, "llama-server")
+		if err != nil {
+			t.Fatalf("Failed to kickstart: %v", err)
+		}
+
+		// Wait briefly for background poller ticks
+		time.Sleep(30 * time.Millisecond)
+
+		// Stop terminates background poller
+		_, stopErr := lc.Stop(ctx, "llama-server")
+		if stopErr != nil {
+			t.Fatalf("Failed to stop: %v", stopErr)
+		}
+	})
+
+	t.Run("Print service status extracts PID", func(t *testing.T) {
 		out, printErr := lc.Print(ctx, "whisper")
 		if printErr != nil {
 			t.Fatalf("Expected success, got: %v", printErr)
 		}
-		if !strings.Contains(out, "running") {
-			t.Errorf("Expected running state in output, got %q", out)
+		if !strings.Contains(out, "pid = 12345") {
+			t.Errorf("Expected pid in print output, got %q", out)
+		}
+	})
+
+	t.Run("ExtractPIDFromOutput across formats", func(t *testing.T) {
+		pid1, ok1 := instrumented.ExtractPIDFromOutput("service spawned with pid: 9876")
+		if !ok1 || pid1 != 9876 {
+			t.Errorf("Expected 9876, got %d (ok=%v)", pid1, ok1)
+		}
+
+		pid2, ok2 := instrumented.ExtractPIDFromOutput("state = running\n\tpid = 5432\npath = ...")
+		if !ok2 || pid2 != 5432 {
+			t.Errorf("Expected 5432, got %d (ok=%v)", pid2, ok2)
+		}
+
+		pid3, ok3 := instrumented.ExtractPIDFromOutput("{\n\t\"PID\" = 1111;\n}")
+		if !ok3 || pid3 != 1111 {
+			t.Errorf("Expected 1111, got %d (ok=%v)", pid3, ok3)
 		}
 	})
 

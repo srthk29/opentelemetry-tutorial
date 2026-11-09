@@ -156,6 +156,15 @@ type LaunchctlMetrics struct {
 
 	// ServicesRunning tracks estimated services started (+1) and stopped (-1).
 	ServicesRunning metric.Int64UpDownCounter
+
+	// ProcessCPU records instantaneous/monitored CPU utilization percentage of the service.
+	ProcessCPU metric.Float64Gauge
+
+	// ProcessMemoryRSS records physical resident memory (RSS) in bytes.
+	ProcessMemoryRSS metric.Int64Gauge
+
+	// ProcessMemoryPerc records physical memory utilization percentage.
+	ProcessMemoryPerc metric.Float64Gauge
 }
 
 // NewLaunchctlMetrics initializes the standard OpenTelemetry metrics for launchctl.
@@ -200,10 +209,40 @@ func NewLaunchctlMetrics(meter metric.Meter) (*LaunchctlMetrics, error) {
 		return nil, fmt.Errorf("failed to create service.launchctl.services_running: %w", err)
 	}
 
+	processCPU, err := meter.Float64Gauge(
+		"service.launchctl.process.cpu_utilization",
+		metric.WithDescription("Current CPU utilization percentage of the launchctl service process"),
+		metric.WithUnit("%"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.process.cpu_utilization: %w", err)
+	}
+
+	processMemoryRSS, err := meter.Int64Gauge(
+		"service.launchctl.process.memory_bytes",
+		metric.WithDescription("Physical resident memory (RSS) of the launchctl service in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.process.memory_bytes: %w", err)
+	}
+
+	processMemoryPerc, err := meter.Float64Gauge(
+		"service.launchctl.process.memory_utilization",
+		metric.WithDescription("Memory utilization percentage of the launchctl service"),
+		metric.WithUnit("%"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service.launchctl.process.memory_utilization: %w", err)
+	}
+
 	return &LaunchctlMetrics{
 		OperationDuration: operationDuration,
 		OperationsTotal:   operationsTotal,
 		ActiveOperations:  activeOperations,
 		ServicesRunning:   servicesRunning,
+		ProcessCPU:        processCPU,
+		ProcessMemoryRSS:  processMemoryRSS,
+		ProcessMemoryPerc: processMemoryPerc,
 	}, nil
 }

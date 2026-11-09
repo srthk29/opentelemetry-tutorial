@@ -1,6 +1,6 @@
 # Industry-Standard OpenTelemetry Instrumentation for macOS launchctl
 
-This guide explains how [`InstrumentedLaunchController`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/instrumented_launchctl.go#L19-L26) wraps the [`LaunchController`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/launchctl.go#L11-L16) interface ([`launchctl.go`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/launchctl.go)) using official **OpenTelemetry Process & Command Execution Semantic Conventions**.
+This guide explains how [`InstrumentedLaunchController`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/instrumented_launchctl.go#L53-L64) wraps the [`LaunchController`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/launchctl.go#L11-L16) interface ([`launchctl.go`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/launchctl.go)) using official **OpenTelemetry Process & Command Execution Semantic Conventions** and a **hybrid CPU & memory consumption monitoring strategy**.
 
 ---
 
@@ -8,69 +8,87 @@ This guide explains how [`InstrumentedLaunchController`](file:///Users/sarthak/D
 
 ```mermaid
 flowchart TD
-    subgraph ClientCode ["Client Service Manager"]
-        A["Application Workflow<br/>(e.g., whisper, llama-server, localai)"]
+    subgraph ClientCode ["Client Workflow"]
+        A["lc.Kickstart(ctx, 'llama-server')<br/>or lc.Start(ctx, 'whisper')"]
     end
 
-    subgraph WrapperLayer ["Instrumented Wrapper Layer"]
-        B["InstrumentedLaunchController<br/>(Implements LaunchController)"]
-    end
-
-    subgraph ExecutionLayer ["Execution Layer"]
-        C["ExecLaunchController<br/>(Executes launchctl via os/exec)"]
-        D["macOS launchd Daemon"]
+    subgraph WrapperLayer ["InstrumentedLaunchController (Decorator)"]
+        B["Execute Command & Extract PID<br/>- kickstart -k -p: 'service spawned with pid: <PID>'<br/>- print: 'pid = <PID>'"]
+        C["Hybrid Resource Inspector<br/>1. Point-in-time Snapshot on Span<br/>2. Optional Background Ticker"]
+        D["ps -p $PID -o %cpu,%mem,rss,vsz | jc --ps<br/>(with pure-Go fallback parser)"]
     end
 
     subgraph Observability ["Observability Backend"]
-        Tracer["OpenTelemetry Tracer<br/>(launchctl {action} Span)"]
-        Prom["Prometheus Meter<br/>(Operations total, Latency, Active, Running)"]
+        Tracer["OpenTelemetry Tracer<br/>(process.pid, cpu.utilization, memory.usage)"]
+        Prom["Prometheus Meter<br/>(Gauges: CPU %, Mem %, Memory RSS bytes)"]
     end
 
     A --> B
     B --> C
     C --> D
-    B -.-> Tracer
-    B -.-> Prom
+    C -.-> Tracer
+    C -.-> Prom
 ```
 
 ---
 
-## 🔍 OpenTelemetry Semantic Conventions for Process / Command Execution
+## 🔍 PID Resolution Strategy
 
-### 1. Span Specification
-- **Span Name**: `launchctl {action}` (e.g., `launchctl start`, `launchctl stop`, `launchctl kickstart`, `launchctl print`).
-- **Span Kind**: [`trace.SpanKindInternal`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/internal/instrumented/instrumented_launchctl.go#L114) (standard for CLI command invocations).
-- **Standard Attributes**:
-
-| Attribute Key | Type | Description | Example |
-|---|---|---|---|
-| `process.executable.name` | `string` | Binary name | `"launchctl"` |
-| `process.command` | `string` | Invocation command | `"launchctl"` |
-| `process.command_args` | `[]string` | Arguments vector | `["launchctl", "start", "whisper"]` |
-| `launchctl.action` | `string` | Target subcommand | `"start"`, `"stop"`, `"kickstart"`, `"print"` |
-| `service.name` | `string` | Name of the daemon/service | `"whisper"`, `"llama-server"` |
-| `process.exit_code` | `int` | Process exit code | `0` (or non-zero on failure) |
-| `process.output_length` | `int` | Output length in bytes | `42` |
-| `error.type` | `string` | Error type on failure | `"*exec.ExitError"` |
+* **`Kickstart(ctx, service)`**:
+  Executes `launchctl kickstart -k -p <target>`. On modern macOS, passing `-p` instructs `launchctl` to spawn the service and print the PID directly:
+  ```text
+  service spawned with pid: 12345
+  ```
+  The wrapper uses regex `service spawned with pid:\s*(\d+)` to instantly extract the PID without secondary lookups.
+* **`Start(ctx, service)`**:
+  Executes `launchctl start <target>` (kept separate as legacy syntax). If PID is not in output, the wrapper queries `launchctl print <target>` to discover `pid = <PID>`.
+* **`Print(ctx, service)`**:
+  Executes `launchctl print <target>` and extracts `pid = <PID>`.
+* **`Stop(ctx, service)`**:
+  Executes `launchctl stop <target>`, halts any active background resource monitor, and decrements the running service counter.
 
 ---
 
-## 📊 Standard Process & Service Metrics
+## ⚡ Hybrid CPU & Memory Monitoring (`jc --ps`)
 
-Instruments are registered under meter `service.launchctl`:
+Once the PID is known, the wrapper inspects the process:
+```bash
+ps -p $PID -o %cpu,%mem,rss,vsz | jc --ps
+```
+Output:
+```json
+[{"rss": 137092, "vsz": 35345680, "cpu_percent": 1.6, "mem_percent": 0.8}]
+```
 
-| Metric Name | Instrument | Unit | Description | Key Dimensions (Labels) |
+### 1. Point-in-time Snapshot
+Automatically attached to the current `launchctl` execution span:
+* `process.pid`: `12345`
+* `process.cpu.utilization`: `1.6` (%)
+* `process.memory.utilization`: `0.8` (%)
+* `process.memory.usage`: `140382208` (RSS in bytes = `137092 * 1024`)
+
+### 2. Continuous Background Polling (Optional)
+By calling `lc.SetPollInterval(5 * time.Second)`, a lightweight background goroutine continuously samples `ps | jc` while the service runs, reporting real-time CPU and memory metrics to Prometheus until `Stop` is called.
+
+---
+
+## 📊 Prometheus Metric Instruments
+
+Registered under meter `service.launchctl`:
+
+| Metric Name | Instrument | Unit | Description | Key Labels |
 |---|---|---|---|---|
 | **`service.launchctl.operations.total`** | `Int64Counter` | `{operation}` | Total launchctl commands executed | `launchctl.action`, `service.name`, `status` (`"success"` / `"error"`), `error.type` |
 | **`service.launchctl.operation.duration`** | `Float64Histogram` | `ms` | Latency distribution of command execution | `launchctl.action`, `service.name`, `status`, `error.type` |
 | **`service.launchctl.active_operations`** | `Int64UpDownCounter` | `{operation}` | In-flight active launchctl commands | `launchctl.action`, `service.name` |
 | **`service.launchctl.services_running`** | `Int64UpDownCounter` | `{service}` | Estimated count of running services | `service.name` |
+| **`service.launchctl.process.cpu_utilization`** | `Float64Gauge` | `%` | Current CPU percentage of the running daemon | `service.name`, `process.pid` |
+| **`service.launchctl.process.memory_bytes`** | `Int64Gauge` | `By` | Physical resident memory (RSS) in bytes | `service.name`, `process.pid` |
+| **`service.launchctl.process.memory_utilization`**| `Float64Gauge` | `%` | Percentage of system physical RAM consumed | `service.name`, `process.pid` |
 
 ---
 
 ## 🚀 Usage Example
-
-Matches your exact pattern:
 
 ```go
 package main
@@ -79,6 +97,7 @@ import (
     "context"
     "fmt"
     "log"
+    "time"
 
     "github.com/sarthak/opentelemetry-tutorial/internal/instrumented"
     "go.opentelemetry.io/otel"
@@ -93,26 +112,30 @@ func main() {
         log.Fatalf("failed to init metrics: %v", err)
     }
 
-    // 2. Initialize base executor (e.g. for user GUI session "gui/501" or system)
+    // 2. Initialize base executor (e.g. user GUI session "gui/501")
     baseExec := instrumented.NewExecLaunchController("gui/501")
 
     // 3. Wrap with OpenTelemetry instrumented decorator
     lc, err := instrumented.NewInstrumentedLaunchController(baseExec, metrics)
     if err != nil {
-        log.Fatalf("failed to init instrumented launch controller: %v", err)
+        log.Fatalf("failed to init controller: %v", err)
     }
 
-    // 4. Start & Stop service with automatic traces and metrics
-    out, err := lc.Start(ctx, "whisper")
+    // 4. Activate hybrid continuous background monitoring (e.g. poll every 5s)
+    lc.SetPollInterval(5 * time.Second)
+
+    // 5. Kickstart service (-k -p) -> returns spawned PID and initiates monitoring
+    out, err := lc.Kickstart(ctx, "llama-server")
     if err != nil {
-        log.Fatalf("start error: %v", err)
+        log.Fatalf("kickstart error: %v", err)
     }
+    fmt.Println(out) // "service spawned with pid: 12345"
+
+    // 6. Stop service when done -> terminates process and stops background poller
     defer func() {
-        if _, err := lc.Stop(ctx, "whisper"); err != nil {
+        if _, err := lc.Stop(ctx, "llama-server"); err != nil {
             log.Printf("stop error: %v", err)
         }
     }()
-
-    fmt.Printf("Started service: %s\n", out)
 }
 ```
