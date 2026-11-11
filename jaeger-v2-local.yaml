@@ -1,6 +1,12 @@
 # ==============================================================================
-# Jaeger v2.23+ Configuration for Local Deployment
-# Based on the OpenTelemetry Collector Architecture
+# Jaeger v2 (v2.23+) Configuration
+# Features:
+# 1. Persistent Storage: Badger disk-backed storage (persists across restarts)
+# 2. Metrics Collection: OTLP app metrics + SpanMetrics RED generator
+# 3. Prometheus Scrape Endpoints:
+#    - :8888/metrics (Jaeger internal operational telemetry)
+#    - :8889/metrics (Generated SpanMetrics & ingested OTLP app metrics)
+# 4. Jaeger UI Monitor Tab: Connected to Prometheus (:9090)
 # ==============================================================================
 
 service:
@@ -10,20 +16,20 @@ service:
     - healthcheckv2
 
   pipelines:
+    # Traces pipeline: routes spans to persistent storage AND spanmetrics connector
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger_storage_exporter]
+      exporters: [jaeger_storage_exporter, spanmetrics]
 
-    # Metrics pipeline: Enables MetricsService on OTLP receiver (port 4317)
-    # This prevents 'Unimplemented unknown service MetricsService' errors from clients!
+    # Metrics pipeline: aggregates direct OTLP application metrics AND span-derived RED metrics
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, spanmetrics]
       processors: [memory_limiter, batch]
-      exporters: [nop]
+      exporters: [prometheus]
 
   # ----------------------------------------------------------------------------
-  # Telemetry: Controls Jaeger's own internal Prometheus metrics & logging
+  # Internal Telemetry: Exposes Jaeger's own operational metrics on :8888/metrics
   # ----------------------------------------------------------------------------
   telemetry:
     logs:
@@ -31,15 +37,14 @@ service:
       encoding: console # Options: console (human-readable) or json (production)
 
     metrics:
-      level: normal     # Options: none (disabled), basic, normal, detailed
+      level: normal     # Options: none, basic, normal, detailed
       readers:
-        # Pull-based Prometheus scraper endpoint (Jaeger's own internal metrics)
+        # Endpoint: http://localhost:8888/metrics (scraped by Prometheus job 'jaeger-internal')
         - pull:
             exporter:
               prometheus:
                 host: "0.0.0.0"
-                port: 8888 # Scrape endpoint: http://localhost:8888/metrics
-                # To disable Prometheus metrics: set 'level: none' and 'readers: []'
+                port: 8888
 
 # ------------------------------------------------------------------------------
 # Extensions: Storage backends, Query Web UI, and Health Checks
@@ -50,35 +55,48 @@ extensions:
     http:
       endpoint: "0.0.0.0:13133"
 
-  # Define storage backends (memory, badger, elasticsearch, clickhouse, etc.)
+  # Storage backends: defines persistent trace storage and metrics backend for Query
   jaeger_storage:
     backends:
-      local_memory:
-        memory:
-          max_traces: 50000 # Retain last 50,000 traces in RAM
+      # Persistent on-disk storage using Badger
+      local_badger:
+        badger:
+          ephemeral: false
+          directories:
+            keys: ./bin/badger_data/keys
+            values: ./bin/badger_data/values
 
-  # Exposes the Web UI and Query API
+    # Metric backend for the Jaeger Web UI "Monitor" Tab (RED metrics)
+    metric_backends:
+      prom_backend:
+        prometheus:
+          endpoint: "${env:PROMETHEUS_ENDPOINT:-http://localhost:9090}"
+          normalize_calls: true
+          normalize_duration: true
+
+  # Jaeger Web UI & Query API
   jaeger_query:
     storage:
-      traces: local_memory # References backend defined above
+      traces: local_badger
+      metrics: prom_backend # Enables the "Monitor" tab in Jaeger UI
     http:
       endpoint: "0.0.0.0:16686" # Web UI: http://localhost:16686
     grpc:
       endpoint: "0.0.0.0:16685" # gRPC Query Service
 
 # ------------------------------------------------------------------------------
-# Receivers: How Jaeger accepts traces from SDKs and OTel Collectors
+# Receivers: How Jaeger accepts traces and metrics from SDKs & Collectors
 # ------------------------------------------------------------------------------
 receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: "0.0.0.0:4317" # Standard OTLP gRPC receiver
+        endpoint: "0.0.0.0:4317" # Standard OTLP gRPC port
       http:
-        endpoint: "0.0.0.0:4318" # Standard OTLP HTTP receiver
+        endpoint: "0.0.0.0:4318" # Standard OTLP HTTP port
 
 # ------------------------------------------------------------------------------
-# Processors: Memory protection and pipeline throughput batching
+# Processors: Memory protection and batching
 # ------------------------------------------------------------------------------
 processors:
   memory_limiter:
@@ -91,12 +109,25 @@ processors:
     send_batch_size: 256
 
 # ------------------------------------------------------------------------------
-# Exporters: Connects the trace pipeline to the storage backend
+# Connectors: SpanMetrics automatically calculates RED metrics from traces
+# ------------------------------------------------------------------------------
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [2ms, 6ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+    dimensions:
+      - name: http.status_code
+      - name: rpc.grpc.status_code
+
+# ------------------------------------------------------------------------------
+# Exporters: Storage writing & Prometheus metric endpoint
 # ------------------------------------------------------------------------------
 exporters:
+  # Writes traces to Badger disk storage
   jaeger_storage_exporter:
-    trace_storage: local_memory # References the backend defined in jaeger_storage
+    trace_storage: local_badger
 
-  # Silent discard for incoming metrics (prevents OTLP MetricsService gRPC errors)
-  # You can also use 'debug' (to print metrics) or 'prometheus' (to expose :8889)
-  nop: {}
+  # Scrape endpoint for Prometheus to collect SpanMetrics & App metrics (:8889/metrics)
+  prometheus:
+    endpoint: "0.0.0.0:8889"

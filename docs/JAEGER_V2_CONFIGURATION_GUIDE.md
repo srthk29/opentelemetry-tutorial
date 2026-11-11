@@ -2,6 +2,12 @@
 
 Starting with version 2.0, **Jaeger has been completely re-architected on top of the OpenTelemetry Collector framework**. Instead of using legacy command-line flags and environment variables from v1, Jaeger v2 uses an **OpenTelemetry Collector-compatible YAML configuration file** passed via `--config`.
 
+This guide covers:
+1. **Persistent Storage** (Badger for embedded local disk, ClickHouse for high-throughput, and OpenSearch for enterprise).
+2. **Metrics Collection** (Automatic RED SpanMetrics generation + OTLP application metrics ingestion).
+3. **Prometheus Scraping Endpoints** (`:8888` for internal telemetry, `:8889` for pipeline/RED metrics, and Jaeger UI Monitor tab integration).
+4. **Architectural Evaluation of Better Alternatives** (Grafana Tempo / LGTM Stack, SigNoz, Decoupled OTel Collector, VictoriaMetrics).
+
 ---
 
 ## 🏗️ Architectural Overview: How Jaeger v2 Works
@@ -20,36 +26,53 @@ flowchart TD
         Batch["batch"]
     end
 
-    subgraph Exporters ["3. Exporters"]
-        StorageExporter["jaeger_storage_exporter"]
+    subgraph Connectors ["3. Connectors"]
+        SpanMetrics["spanmetrics (RED Metrics Generator)"]
     end
 
-    subgraph Extensions ["4. Extensions"]
-        Storage["jaeger_storage<br/>(memory, badger, clickhouse, etc.)"]
-        Query["jaeger_query<br/>(Web UI :16686, gRPC :16685)"]
+    subgraph Exporters ["4. Exporters"]
+        StorageExporter["jaeger_storage_exporter"]
+        PromExporter["prometheus (:8889/metrics)"]
+    end
+
+    subgraph Extensions ["5. Extensions"]
+        Storage["jaeger_storage<br/>(Badger, ClickHouse, OpenSearch)"]
+        MetricBackend["jaeger_storage.metric_backends<br/>(Points to Prometheus :9090)"]
+        Query["jaeger_query (Web UI :16686)<br/>Traces + Monitor Tab"]
         Health["healthcheckv2 (:13133)"]
     end
 
-    subgraph Telemetry ["5. Internal Telemetry"]
-        PromMetrics["service.telemetry.metrics<br/>(Prometheus scraper :8888/metrics)"]
+    subgraph Telemetry ["6. Internal Telemetry"]
+        PromMetrics["service.telemetry.metrics<br/>(:8888/metrics)"]
         Logs["service.telemetry.logs"]
     end
 
-    OTLP_gRPC --> MemLimiter --> Batch --> StorageExporter
+    OTLP_gRPC --> MemLimiter --> Batch
     OTLP_HTTP --> MemLimiter
-    StorageExporter -.->|writes spans| Storage
-    Query -.->|reads spans| Storage
+    Batch --> StorageExporter --> Storage
+    Batch --> SpanMetrics --> PromExporter
+    Batch -.-> PromExporter
+
+    Storage -.-> Query
+    MetricBackend -.-> Query
 ```
 
 ---
 
-## 📄 Complete Sample Configuration File (`jaeger-v2-local.yaml`)
+## 📄 Complete Verified Configuration (`jaeger-v2-local.yaml`)
 
-Here is the complete configuration file for a local standalone deployment. It is also available in the repository root as [`jaeger-v2-local.yaml`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/jaeger-v2-local.yaml):
+This configuration is available in the repository root as [`jaeger-v2-local.yaml`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/jaeger-v2-local.yaml):
 
 ```yaml
 # ==============================================================================
-# Jaeger v2.23+ Local Deployment Configuration
+# Jaeger v2 (v2.23+) Configuration
+# Features:
+# 1. Persistent Storage: Badger disk-backed storage (persists across restarts)
+# 2. Metrics Collection: OTLP app metrics + SpanMetrics RED generator
+# 3. Prometheus Scrape Endpoints:
+#    - :8888/metrics (Jaeger internal operational telemetry)
+#    - :8889/metrics (Generated SpanMetrics & ingested OTLP app metrics)
+# 4. Jaeger UI Monitor Tab: Connected to Prometheus (:9090)
 # ==============================================================================
 
 service:
@@ -59,38 +82,38 @@ service:
     - healthcheckv2
 
   pipelines:
+    # Traces pipeline: routes spans to persistent storage AND spanmetrics connector
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger_storage_exporter]
+      exporters: [jaeger_storage_exporter, spanmetrics]
 
-    # Metrics pipeline: Enables MetricsService on OTLP receiver (port 4317)
-    # Prevents "Unimplemented unknown service MetricsService" error from client SDKs!
+    # Metrics pipeline: aggregates direct OTLP application metrics AND span-derived RED metrics
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, spanmetrics]
       processors: [memory_limiter, batch]
-      exporters: [nop]
+      exporters: [prometheus]
 
   # ----------------------------------------------------------------------------
-  # 1. Internal Telemetry: Prometheus Metrics & Component Logging
+  # Internal Telemetry: Exposes Jaeger's own operational metrics on :8888/metrics
   # ----------------------------------------------------------------------------
   telemetry:
     logs:
       level: info       # Options: debug, info, warn, error
-      encoding: console # Options: console (human readable) or json (production)
+      encoding: console # Options: console (human-readable) or json (production)
 
     metrics:
-      level: normal     # Options: none (disabled), basic, normal, detailed
+      level: normal     # Options: none, basic, normal, detailed
       readers:
-        # Pull-based Prometheus scraper endpoint (Jaeger's own internal metrics)
+        # Endpoint: http://localhost:8888/metrics (scraped by Prometheus job 'jaeger-internal')
         - pull:
             exporter:
               prometheus:
                 host: "0.0.0.0"
-                port: 8888 # Scrape endpoint: http://localhost:8888/metrics
+                port: 8888
 
 # ------------------------------------------------------------------------------
-# 2. Extensions: Storage Backends, Query UI, and Health Checks
+# Extensions: Storage backends, Query Web UI, and Health Checks
 # ------------------------------------------------------------------------------
 extensions:
   healthcheckv2:
@@ -98,24 +121,37 @@ extensions:
     http:
       endpoint: "0.0.0.0:13133"
 
-  # Defines storage backends (memory, badger, clickhouse, elasticsearch, etc.)
+  # Storage backends: defines persistent trace storage and metrics backend for Query
   jaeger_storage:
     backends:
-      local_memory:
-        memory:
-          max_traces: 50000 # Retain last 50,000 traces in RAM
+      # Persistent on-disk storage using Badger
+      local_badger:
+        badger:
+          ephemeral: false
+          directories:
+            keys: ./bin/badger_data/keys
+            values: ./bin/badger_data/values
 
-  # Exposes the Web UI and Query API
+    # Metric backend for the Jaeger Web UI "Monitor" Tab (RED metrics)
+    metric_backends:
+      prom_backend:
+        prometheus:
+          endpoint: "${env:PROMETHEUS_ENDPOINT:-http://localhost:9090}"
+          normalize_calls: true
+          normalize_duration: true
+
+  # Jaeger Web UI & Query API
   jaeger_query:
     storage:
-      traces: local_memory # References the backend defined in jaeger_storage
+      traces: local_badger
+      metrics: prom_backend # Enables the "Monitor" tab in Jaeger UI
     http:
-      endpoint: "0.0.0.0:16686" # Web UI URL: http://localhost:16686
+      endpoint: "0.0.0.0:16686" # Web UI: http://localhost:16686
     grpc:
       endpoint: "0.0.0.0:16685" # gRPC Query Service
 
 # ------------------------------------------------------------------------------
-# 3. Receivers: Ingestion endpoints for SDKs & OTel Collectors
+# Receivers: How Jaeger accepts traces and metrics from SDKs & Collectors
 # ------------------------------------------------------------------------------
 receivers:
   otlp:
@@ -126,7 +162,7 @@ receivers:
         endpoint: "0.0.0.0:4318" # Standard OTLP HTTP port
 
 # ------------------------------------------------------------------------------
-# 4. Processors: Performance & memory protection
+# Processors: Memory protection and batching
 # ------------------------------------------------------------------------------
 processors:
   memory_limiter:
@@ -139,111 +175,37 @@ processors:
     send_batch_size: 256
 
 # ------------------------------------------------------------------------------
-# 5. Exporters: Connects the trace pipeline to the storage backend
+# Connectors: SpanMetrics automatically calculates RED metrics from traces
+# ------------------------------------------------------------------------------
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [2ms, 6ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+    dimensions:
+      - name: http.status_code
+      - name: rpc.grpc.status_code
+
+# ------------------------------------------------------------------------------
+# Exporters: Storage writing & Prometheus metric endpoint
 # ------------------------------------------------------------------------------
 exporters:
+  # Writes traces to Badger disk storage
   jaeger_storage_exporter:
-    trace_storage: local_memory # References backend defined in jaeger_storage
+    trace_storage: local_badger
 
-  # Silent discard for incoming metrics (absorbs OTLP MetricsService gRPC requests)
-  nop: {}
+  # Scrape endpoint for Prometheus to collect SpanMetrics & App metrics (:8889/metrics)
+  prometheus:
+    endpoint: "0.0.0.0:8889"
 ```
 
 ---
 
-## 📊 How to Enable / Disable Prometheus Metrics
+## 💾 1. Persistent Storage Options
 
-Jaeger v2 emits **internal operational metrics** (e.g. `otelcol_receiver_accepted_spans`, `otelcol_processor_batch_batch_send_size`, memory consumption, and storage write latency) using the OpenTelemetry Collector's `service.telemetry.metrics` engine.
-
-### A. How to Enable the Prometheus Metrics Endpoint
-To expose Prometheus metrics on a dedicated port (e.g. `8888`):
-
-```yaml
-service:
-  telemetry:
-    metrics:
-      level: normal # 'normal' or 'detailed' (includes fine-grained bucket breakdowns)
-      readers:
-        - pull:
-            exporter:
-              prometheus:
-                host: "0.0.0.0"
-                port: 8888 # Endpoint: http://localhost:8888/metrics
-```
-
-#### How to Scrape & Verify:
-```bash
-curl -s http://localhost:8888/metrics | head -n 25
-```
-You will see Prometheus-formatted metrics:
-```text
-# HELP otelcol_receiver_accepted_spans Number of spans successfully pushed into the pipeline.
-# TYPE otelcol_receiver_accepted_spans counter
-otelcol_receiver_accepted_spans{receiver="otlp",transport="grpc"} 142
-```
-
----
-
-### B. How to Disable Prometheus Metrics Completely
-If you want to reduce CPU overhead or prevent exposing a metrics port in production or local environments:
-
-```yaml
-service:
-  telemetry:
-    metrics:
-      level: none # Completely disables metric generation
-      readers: [] # Disables the HTTP scrape listener
-```
-
-> **Why `level: none`?** Setting `level: none` stops the metric SDK from collecting internal counters, eliminating memory allocations and CPU overhead from meter evaluations.
-
----
-
-### C. Troubleshooting: `failed to upload metrics: rpc error: code = Unimplemented desc = unknown service opentelemetry.proto.collector.metrics.v1.MetricsService`
-
-#### Why This Error Happens
-1. **Jaeger is a Distributed Tracing system, not a metrics store**.
-2. When an OpenTelemetry SDK has a Metric Exporter enabled (`otlpmetricgrpc`), it periodically calls the gRPC `MetricsService` (`opentelemetry.proto.collector.metrics.v1.MetricsService`) on port `4317`.
-3. If Jaeger's configuration only defines a `traces` pipeline, Jaeger's OTLP receiver **only registers `TraceService`** and ignores `MetricsService`.
-4. When your app tries to push metrics, Jaeger returns `Unimplemented (unknown service MetricsService)`.
-
-#### How to Fix It:
-* **Fix 1: Add a `metrics` pipeline with `nop` in `jaeger-v2-local.yaml` (Recommended for Jaeger v2)**:
-  Because Jaeger v2 is built on the OTel Collector, you can tell Jaeger to accept and safely drop or export client metrics:
-  ```yaml
-  exporters:
-    jaeger_storage_exporter:
-      trace_storage: local_memory
-    nop: {} # Or 'prometheus' to scrape at :8889
-
-  service:
-    pipelines:
-      traces:
-        receivers: [otlp]
-        processors: [memory_limiter, batch]
-        exporters: [jaeger_storage_exporter]
-      metrics:
-        receivers: [otlp]
-        processors: [memory_limiter, batch]
-        exporters: [nop] # Tells Jaeger to accept MetricsService calls!
-  ```
-
-* **Fix 2: Route through OpenTelemetry Collector (Standard Production Architecture)**:
-  Do not point applications directly to Jaeger. Point applications to the OpenTelemetry Collector (`localhost:4317`), which routes traces to Jaeger (`otlp/jaeger`) and metrics to Prometheus (`prometheus: :8889`).
-
-* **Fix 3: Disable metric exporting in client application**:
-  If pointing directly to Jaeger, disable OTLP metric export in the client by setting:
-  ```bash
-  export OTEL_METRICS_EXPORTER=none
-  ```
-
----
-
-## ⚙️ Other Commonly Used Configurations
-
-### 1. Persistent Storage on Local Disk (Badger)
-If you do not want an external database like Elasticsearch or ClickHouse, but want traces to **persist across restarts** instead of vanishing from RAM:
-
+### A. Badger (Embedded Key-Value Store on Local Disk)
+* **Use Case**: Single-node environments, local development, edge devices.
+* **Why**: Zero external server to manage or pay for; data persists across restarts in `keys` and `values` directories.
 ```yaml
 extensions:
   jaeger_storage:
@@ -254,142 +216,96 @@ extensions:
           directories:
             keys: ./bin/badger_data/keys
             values: ./bin/badger_data/values
-
-  jaeger_query:
-    storage:
-      traces: local_badger
-
-exporters:
-  jaeger_storage_exporter:
-    trace_storage: local_badger
 ```
 
----
-
-### 2. Remote Production Storage (ClickHouse)
-For production deployments using ClickHouse:
-
+### B. ClickHouse (High-Throughput Columnar Database)
+* **Use Case**: Scalable production tracing with high ingest rates and fast analytical queries.
+* **Why**: Uses 5–10x less disk space than Elasticsearch due to columnar compression, zero JVM tuning.
 ```yaml
 extensions:
   jaeger_storage:
     backends:
       prod_clickhouse:
         clickhouse:
-          addresses:
-            - "localhost:9000"
+          addresses: ["clickhouse:9000"]
           database: "jaeger"
-          auth:
-            basic:
-              username: "default"
-              password: "${env:CLICKHOUSE_PASSWORD:-secret}"
           create_schema: true
 ```
 
----
-
-### 3. Avoiding Port Conflicts on macOS
-On macOS, port `4317` might already be used by a standalone OpenTelemetry Collector. You can remap Jaeger's OTLP receiver to `4319`:
-
+### C. OpenSearch / Elasticsearch (Traditional Distributed Search)
+* **Use Case**: Organizations with existing OpenSearch/ES infrastructure.
 ```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: "0.0.0.0:4319" # Remapped from default 4317
-      http:
-        endpoint: "0.0.0.0:4320" # Remapped from default 4318
-
-extensions:
-  jaeger_query:
-    http:
-      endpoint: "0.0.0.0:16686" # Web UI remains accessible at :16686
-```
-
----
-
-### 4. Customizing the UI (`jaeger_query`)
-You can inject custom external links (e.g. Kibana logs, Grafana dashboards) or modify the lookback window:
-
-```yaml
-extensions:
-  jaeger_query:
-    storage:
-      traces: local_memory
-    ui:
-      config_file: ./monitoring/jaeger-ui-config.json
-```
-
-Sample `./monitoring/jaeger-ui-config.json`:
-```json
-{
-  "search": {
-    "maxLookback": { "label": "2 Days", "value": "2d" },
-    "maxLimit": 1500
-  },
-  "menu": [
-    {
-      "label": "Prometheus Metrics",
-      "url": "http://localhost:9090"
-    }
-  ]
-}
-```
-
----
-
-### 5. Environment Variable Interpolation
-Jaeger v2 natively supports OpenTelemetry environment variable substitution using `${env:VAR_NAME:-default}`:
-
-```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: "0.0.0.0:${env:JAEGER_OTLP_GRPC_PORT:-4317}"
-
 extensions:
   jaeger_storage:
     backends:
-      local_memory:
-        memory:
-          max_traces: ${env:JAEGER_MAX_TRACES:-50000}
+      prod_opensearch:
+        opensearch:
+          endpoints: ["http://opensearch:9200"]
+          index_prefix: "jaeger"
 ```
 
 ---
 
-## 🚀 How to Run Jaeger v2 with the YAML Configuration
+## 📈 2. Metrics Collection Strategy
 
-### Option A: Using the Native Standalone Binary on macOS
-```bash
-# Pass configuration directly using --config
-./bin/jaeger-all-in-one --config=jaeger-v2-local.yaml
-```
-*(Or simply run `make run-jaeger`, which automatically loads `jaeger-v2-local.yaml`)*.
+Jaeger v2 handles **two separate metrics streams**:
 
----
-
-### Option B: Using Official Docker Container
-```bash
-docker run --rm -d \
-  --name jaeger \
-  -p 16686:16686 \
-  -p 4317:4317 \
-  -p 4318:4318 \
-  -p 8888:8888 \
-  -v $(pwd)/jaeger-v2-local.yaml:/etc/jaeger/config.yaml \
-  jaegertracing/jaeger:2.23.0 \
-  --config=/etc/jaeger/config.yaml
-```
+1. **Derived RED Metrics (SpanMetrics)**:
+   - The `spanmetrics` connector passively inspects all incoming trace spans.
+   - Computes:
+     - `calls_total` (Request Rate and Error Count partitioned by service, span name, and status code).
+     - `duration_milliseconds` (Latency distribution histogram across predefined buckets).
+2. **Application OTLP Metrics**:
+   - Accepts metrics pushed by OpenTelemetry client SDKs (`otlpmetricgrpc` / `otlpmetrichttp`).
+   - Prevents `Unimplemented unknown service MetricsService` errors.
+   - Combines with SpanMetrics in the `metrics` pipeline to export to Prometheus.
 
 ---
 
-## 📋 Jaeger v2 Port Reference
+## 🎯 3. Prometheus Scraping Configuration
 
-| Port | Protocol | Component | Purpose |
-| :--- | :--- | :--- | :--- |
-| **`16686`** | HTTP | `jaeger_query` | Web UI & HTTP Query API (`http://localhost:16686`) |
-| **`16685`** | gRPC | `jaeger_query` | gRPC Query retrieval service |
-| **`4317`** | gRPC | `receivers.otlp` | Inbound OTLP trace collection |
-| **`4318`** | HTTP | `receivers.otlp` | Inbound OTLP HTTP trace collection |
-| **`8888`** | HTTP | `service.telemetry.metrics` | Internal Prometheus scrape endpoint (`http://localhost:8888/metrics`) |
-| **`13133`** | HTTP | `healthcheckv2` | Health check endpoint (`http://localhost:13133`) |
+Jaeger v2 exposes two scrape endpoints:
+
+1. **`:8888/metrics`**: Jaeger's own operational metrics (`otelcol_receiver_accepted_spans`, `otelcol_processor_batch_batch_send_size`, memory usage).
+2. **`:8889/metrics`**: The pipeline exporter delivering SpanMetrics (RED metrics) and application metrics.
+
+### Prometheus Configuration ([`prometheus-local.yaml`](file:///Users/sarthak/Documents/code/golang/OpenTelemeteryTutorial/prometheus-local.yaml))
+```yaml
+scrape_configs:
+  # Scrapes pipeline RED metrics and application metrics
+  - job_name: "jaeger-pipeline"
+    static_configs:
+      - targets: ["localhost:8889"]
+
+  # Scrapes Jaeger v2 internal health & operational metrics
+  - job_name: "jaeger-internal"
+    static_configs:
+      - targets: ["localhost:8888"]
+```
+
+### Jaeger UI "Monitor" Tab Integration
+By setting `metric_backends` in `jaeger_storage` and pointing `jaeger_query.storage.metrics` to it, the Jaeger UI queries Prometheus (`:9090`) to render the **Monitor Tab** with request rates, error rates, and p50/p95/p99 latency curves directly in the Jaeger UI.
+
+---
+
+## ⚖️ 4. Better Alternatives to Jaeger
+
+While Jaeger v2 is an improvement over v1, several modern alternatives offer distinct advantages in cloud-native production:
+
+### Alternative Comparison
+
+| Architecture | Storage Engine | Metric Integration | Cost Profile | Best Fit |
+|---|---|---|---|---|
+| **Jaeger v2 + Prometheus** | Badger / ClickHouse / ES | External Prometheus (pull) | Medium | Teams wanting a dedicated trace viewer with standard OTel Collector config |
+| **Grafana Tempo + Prometheus + Loki** | **Object Storage (S3 / GCS / MinIO)** | Native Remote-Write + Grafana UI | **Lowest** (no DB maintenance, cheap S3) | **Cloud-native teams already using Grafana** |
+| **SigNoz** | **ClickHouse** | Native Unified (Traces + Metrics + Logs) | Low (Single data store) | **Teams wanting an all-in-one Datadog alternative without stitching tools** |
+| **Decoupled OTel Collector + Prometheus + Jaeger** | Pluggable | Decoupled routing | Medium | **High-reliability enterprise architectures** |
+
+### Why Grafana Tempo is Often Better:
+1. **Object Storage Instead of Databases**: Stores traces in Amazon S3, Google Cloud Storage, or MinIO. You never have to manage Elasticsearch indices, sharding, or disk capacity.
+2. **Cost Reduction**: Tracing storage costs drop by **75–90%** compared to Elasticsearch.
+3. **Deep Telemetry Correlation**: In Grafana, clicking on a Prometheus metric spike or Loki log error instantly displays the exact correlated Tempo trace.
+
+### Why SigNoz is Often Better:
+1. **Single Pane of Glass**: Rather than running Jaeger (traces) + Prometheus (metrics) + Loki (logs) + Grafana (visualization), SigNoz bundles everything into one unified OpenTelemetry-native platform backed by ClickHouse.
+2. **Zero-Configuration APM**: Generates service maps, error rates, and p99 latency alerts out of the box.

@@ -4,7 +4,12 @@ global:
   evaluation_interval: 5s
 
 scrape_configs:
-  # Scrapes metrics emitted by the local OpenTelemetry Collector
-  - job_name: "otel-collector-local"
+  # 1. Pipeline metrics & SpanMetrics (emitted by Jaeger v2 or OTel Collector on :8889)
+  - job_name: "pipeline-metrics"
     static_configs:
       - targets: ["localhost:8889"]
+
+  # 2. Jaeger v2 internal operational telemetry (:8888)
+  - job_name: "jaeger-internal"
+    static_configs:
+      - targets: ["localhost:8888"]
